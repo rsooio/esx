@@ -78,9 +78,8 @@ const completer = repl.completer.bind(repl);
   if (line.startsWith(".ns ")) {
     const prefix = line.match(/^\s*\.ns\s+(\S*)$/)?.[1] ?? "";
     const hits = Array.from(modules.keys())
-      .filter((name) => name.startsWith(prefix))
-      .map((name) => `${line.slice(0, -prefix.length)}${name}`);
-    callback(null, [hits, line]);
+      .filter((name) => name.startsWith(prefix));
+    callback(null, [hits, prefix]);
   }
   return completer(line, callback);
 }
