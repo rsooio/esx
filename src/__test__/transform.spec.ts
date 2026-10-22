@@ -5,71 +5,62 @@ import assert from "node:assert";
 suite("import declarations", () => {
   test("named import", () => {
     const { code, imports } = compile('import { x } from "y";');
-    assert.strictEqual(code, `var { x } = await __import("y")`);
+    assert.strictEqual(code, "");
     assert.deepStrictEqual(imports, [
-      { imported: "x", local: "x", source: "y" },
+      { type: "named", imported: "x", local: "x", source: "y" },
     ]);
   });
 
   test("named import with alias", () => {
     const { code, imports } = compile('import { x as y } from "z";');
-    assert.strictEqual(code, `var { x: y } = await __import("z")`);
+    assert.strictEqual(code, "");
     assert.deepStrictEqual(imports, [
-      { imported: "x", local: "y", source: "z" },
-    ]);
-  });
-
-  test("named import with attributes", () => {
-    const source = 'import { x } from "y" with { type: "json" };'
-    const expected = `var { x } = await __import("y", { type: "json" })`;
-    const { code, imports } = compile(source);
-    assert.strictEqual(code, expected);
-    assert.deepStrictEqual(imports, [
-      { imported: "x", local: "x", source: "y" },
+      { type: "named", imported: "x", local: "y", source: "z" },
     ]);
   });
 
   test("multiple named imports", () => {
     const { code, imports } = compile('import { x, y as z } from "a";');
-    const expected = `var { x, y: z } = await __import("a")`;
-    assert.strictEqual(code, expected);
+    assert.strictEqual(code, "");
     assert.deepStrictEqual(imports, [
-      { imported: "x", local: "x", source: "a" },
-      { imported: "y", local: "z", source: "a" },
+      { type: "named", imported: "x", local: "x", source: "a" },
+      { type: "named", imported: "y", local: "z", source: "a" },
     ]);
   });
 
   test("named and default import", () => {
     const { code, imports } = compile('import x, { y, z as a } from "b";');
-    const expected = `var { y, z: a, default: x } = await __import("b")`;
-    assert.strictEqual(code, expected);
+    assert.strictEqual(code, "");
     assert.deepStrictEqual(imports, [
-      { imported: "default", local: "x", source: "b" },
-      { imported: "y", local: "y", source: "b" },
-      { imported: "z", local: "a", source: "b" },
+      { type: "default", local: "x", source: "b" },
+      { type: "named", imported: "y", local: "y", source: "b" },
+      { type: "named", imported: "z", local: "a", source: "b" },
     ]);
   });
 
   test("default import", () => {
     const { code, imports } = compile('import x from "y";');
-    assert.strictEqual(code, `var { default: x } = await __import("y")`);
+    assert.strictEqual(code, "");
     assert.deepStrictEqual(imports, [
-      { imported: "default", local: "x", source: "y" },
+      { type: "default", local: "x", source: "y" },
     ]);
   });
 
   test("namespace import", () => {
     const { code, imports } = compile('import * as x from "y";');
-    assert.strictEqual(code, `var x = await __import("y")`);
+    assert.strictEqual(code, "");
     assert.deepStrictEqual(imports, [
-      { imported: "*", local: "x", source: "y" },
+      { type: "namespace", local: "x", source: "y" },
     ]);
   });
 
   test("namespace with default import", () => {
-    const { code } = compile('import x, * as y from "z";');
-    const expected = `var y = await __import("z"); var x = y.default`;
-    assert.strictEqual(code, expected);
+    const { code, imports } = compile('import x, * as y from "z";');
+    assert.strictEqual(code, "");
+    assert.deepStrictEqual(imports, [
+      { type: "default", local: "x", source: "z" },
+      { type: "namespace", local: "y", source: "z" },
+    ]);
   });
 });
 

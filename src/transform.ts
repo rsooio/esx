@@ -1,18 +1,17 @@
-import { Parser } from "acorn";
-import type { ImportAttribute, Literal, Pattern } from "acorn";
+import { Parser, type Literal } from "acorn";
 import { ancestor } from "acorn-walk";
 
-type Imported = {
-  imported: string;
-  local: string;
-  source: string;
-}
+type Imported =
+  | { type: "namespace"; local: string; source: string }
+  | { type: "default"; local: string; source: string }
+  | { type: "named"; imported: string; local: string; source: string }
+  | { type: "side-effect"; source: string };
 
-type Exported = {
-  exported: string;
-  local: string;
-  source?: string;
-}
+type Exported =
+  | { type: "namespace"; exported: string; source: string }
+  | { type: "default"; local: string }
+  | { type: "named"; exported: string; local: string; source?: string }
+  | { type: "all"; source: string };
 
 const parser = Parser.extend((BaseParser) => class extends BaseParser {
   // @ts-expect-error
@@ -25,22 +24,8 @@ const parser = Parser.extend((BaseParser) => class extends BaseParser {
   }
 });
 
-type Specifier = { name?: string; value?: Literal["value"] };
-
-function toSpecifier(spec: Specifier) {
-  return spec.name ?? JSON.stringify(spec.value);
-}
-
-function toProperty(key: Specifier, value: Specifier) {
-  const name = key.name ?? JSON.stringify(key.value);
-  const val = value.name ?? JSON.stringify(value.value);
-  return name === val ? name : `${name}: ${val}`;
-}
-
-function __import(specifier: Literal["value"], attributes: ImportAttribute[]) {
-  const args = attributes.map((a) => toProperty(a.key, a.value));
-  if (args.length === 0) return `await __import(${JSON.stringify(specifier)})`;
-  return `await __import(${JSON.stringify(specifier)}, { ${args.join(", ")} })`;
+function nameof(specifier: { name?: string; value?: Literal["value"] }) {
+  return specifier.name ?? JSON.stringify(specifier.value);
 }
 
 export function compile(source: string) {
@@ -61,60 +46,25 @@ export function compile(source: string) {
 
   ancestor(ast, {
     ImportDeclaration(node) {
-      const { specifiers } = node;
-      const specifier = node.source.value as string;
-      const attributes = node.attributes;
-
-      if (specifiers.length === 0) {
-        return replace(node, __import(specifier, attributes));
-      }
-
-      let namespaceName: string | null = null;
-      let defaultName: string | null = null;
-      const properties: string[] = [];
-
-      specifiers.forEach((s) => {
-        if (s.type === "ImportNamespaceSpecifier") {
-          namespaceName = s.local.name;
-          imports.push({
-            imported: "*",
-            local: namespaceName,
-            source: specifier,
-          });
-        } else if (s.type === "ImportDefaultSpecifier") {
-          defaultName = s.local.name;
-          imports.push({
-            imported: "default",
-            local: defaultName,
-            source: specifier,
-          });
-        } else {
-          properties.push(toProperty(s.imported, s.local));
-          imports.push({
-            imported: toSpecifier(s.imported),
-            local: s.local.name,
-            source: specifier,
-          });
+      const source = node.source.value as string;
+      const items = node.specifiers.map((s): Imported => {
+        const base = { local: s.local.name, source };
+        switch (s.type) {
+          case "ImportNamespaceSpecifier":
+            return { ...base, type: "namespace" };
+          case "ImportDefaultSpecifier":
+            return { ...base, type: "default" };
+          case "ImportSpecifier":
+            return { ...base, type: "named", imported: nameof(s.imported) };
         }
       });
-
-      if (namespaceName !== null) {
-        let out = `var ${namespaceName} = ${__import(specifier, attributes)}`;
-        if (defaultName != null) {
-          out += `; var ${defaultName} = ${namespaceName}.default`;
-        }
-        replace(node, out);
-      } else {
-        if (defaultName !== null) {
-          properties.push(`default: ${defaultName}`);
-        }
-        const importExpr = __import(specifier, attributes);
-        replace(node, `var { ${properties.join(", ")} } = ${importExpr}`);
-      }
+      if (!items.length) items.push({ type: "side-effect", source });
+      imports.push(...items);
+      replace(node);
     },
     ImportExpression(node) {
       // TODO: inject auto update code for dynamic import
-      replace(node, "__" + source.slice(node.start, node.end));
+      replace({ start: node.start }, "__");
     },
     ExportNamedDeclaration(node) {
       const { declaration, specifiers } = node;
@@ -122,11 +72,12 @@ export function compile(source: string) {
         // export { foo, bar } | export { foo, bar } from "module"
         replace(node, "");
         exports.push(
-          ...specifiers.map((s) => ({
-            exported: toSpecifier(s.exported),
-            local: toSpecifier(s.local),
-            ...(node.source && { source: node.source.value as string }),
-          })),
+          ...specifiers.map((s): Exported => ({
+            type: "named",
+            exported: nameof(s.exported),
+            local: nameof(s.local),
+            source: node.source?.value as string,
+          }))
         );
       } else if (declaration.type === "VariableDeclaration") {
         // export const foo = 42 | export let bar = 43
@@ -134,14 +85,15 @@ export function compile(source: string) {
         replace({ start: node.start, end: start });
         replace({ start, end: start + kind.length }, "var");
         exports.push(
-          ...declaration.declarations.map(({ id }) => {
+          ...declaration.declarations.map(({ id }): Exported => {
             if (id.type !== "Identifier") {
               throw new Error("Only simple variable declarations are supported");
             }
             return {
+              type: "named",
               exported: id.name,
               local: id.name,
-              ...(node.source && { source: node.source.value as string }),
+              source: node.source?.value as string,
             };
           })
         );
@@ -149,9 +101,10 @@ export function compile(source: string) {
         // export function foo() {} | export class Foo {}
         replace({ start: node.start, end: declaration.start });
         exports.push({
+          type: "named",
           exported: declaration.id.name,
           local: declaration.id.name,
-          ...(node.source && { source: node.source.value as string }),
+          source: node.source?.value as string,
         });
       }
     },
@@ -160,21 +113,22 @@ export function compile(source: string) {
       const { declaration } = node;
       if (declaration.type === "Identifier") {
         replace(node);
-        exports.push({ exported: "default", local: declaration.name });
+        exports.push({ type: "default", local: declaration.name });
       } else {
         // export default 42 | export default "foo" | export default { bar: 43 }
         const name = "__default_export__";
         replace({ start: node.start, end: declaration.start }, `var ${name} = `);
-        exports.push({ exported: "default", local: name });
+        exports.push({ type: "default", local: name });
       }
     },
     ExportAllDeclaration(node) {
       replace(node, "");
-      exports.push({
-        exported: node.exported ? toSpecifier(node.exported) : "*",
-        local: "*",
-        source: node.source.value as string,
-      });
+      const source = node.source.value as string;
+      exports.push(
+        node.exported
+          ? { type: "namespace", exported: nameof(node.exported), source }
+          : { type: "all", source }
+      );
     },
     VariableDeclaration(node, _state, ancestors) {
       if (ancestors.length !== 2) return;
