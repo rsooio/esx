@@ -5,7 +5,8 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "test": "node --test src/__test__/*.spec.ts"
+    "test": "node --test src/__test__/*.spec.ts",
+    "test:coverage": "node --test --experimental-test-coverage src/__test__/*.spec.ts"
   },
   "dependencies": {
     "acorn": "^8.15.0",

@@ -75,7 +75,9 @@ suite("export declarations", () => {
   test("named export (variable declaration)", () => {
     const { code, exports } = compile("export const x = 42");
     assert.strictEqual(code, "var x = 42");
-    assert.deepStrictEqual(exports, [{ exported: "x", local: "x" }]);
+    assert.deepStrictEqual(exports, [
+      { type: "named", exported: "x", local: "x" },
+    ]);
   });
 
   test.expectFailure("named export (destructuring variable declaration)", () => {
@@ -85,21 +87,25 @@ suite("export declarations", () => {
   test("named export (function declaration)", () => {
     const { code, exports } = compile("export function x() {}");
     assert.strictEqual(code, "function x() {}");
-    assert.deepStrictEqual(exports, [{ exported: "x", local: "x" }]);
+    assert.deepStrictEqual(exports, [
+      { type: "named", exported: "x", local: "x" },
+    ]);
   });
 
   test("named export (class declaration)", () => {
     const { code, exports } = compile("export class X {}");
     assert.strictEqual(code, "class X {}");
-    assert.deepStrictEqual(exports, [{ exported: "X", local: "X" }]);
+    assert.deepStrictEqual(exports, [
+      { type: "named", exported: "X", local: "X" },
+    ]);
   });
 
   test("named export (no declaration)", () => {
     const { code, exports } = compile('export { x, y as z }');
     assert.strictEqual(code, "");
     assert.deepStrictEqual(exports, [
-      { exported: "x", local: "x" },
-      { exported: "z", local: "y" },
+      { type: "named", exported: "x", local: "x" },
+      { type: "named", exported: "z", local: "y" },
     ]);
   });
 
@@ -107,22 +113,24 @@ suite("export declarations", () => {
     const { code, exports } = compile('export { x, y as z } from "a"');
     assert.strictEqual(code, "");
     assert.deepStrictEqual(exports, [
-      { exported: "x", local: "x", source: "a" },
-      { exported: "z", local: "y", source: "a" },
+      { type: "named", exported: "x", local: "x", source: "a" },
+      { type: "named", exported: "z", local: "y", source: "a" },
     ]);
   });
 
   test("default export (identifier)", () => {
     const { code, exports } = compile("export default x");
     assert.strictEqual(code, "");
-    assert.deepStrictEqual(exports, [{ exported: "default", local: "x" }]);
+    assert.deepStrictEqual(exports, [
+      { type: "default", local: "x" },
+    ]);
   });
 
   test("default export (expression)", () => {
     const { code, exports } = compile("export default 42");
     assert.strictEqual(code, "var __default_export__ = 42");
     assert.deepStrictEqual(exports, [
-      { exported: "default", local: "__default_export__" },
+      { type: "default", local: "__default_export__" },
     ]);
   });
 
@@ -130,7 +138,7 @@ suite("export declarations", () => {
     const { code, exports } = compile('export * from "a"');
     assert.strictEqual(code, "");
     assert.deepStrictEqual(exports, [
-      { exported: "*", local: "*", source: "a" },
+      { type: "all", source: "a" },
     ]);
   });
 
@@ -138,7 +146,7 @@ suite("export declarations", () => {
     const { code, exports } = compile('export * as x from "a"');
     assert.strictEqual(code, "");
     assert.deepStrictEqual(exports, [
-      { exported: "x", local: "*", source: "a" },
+      { type: "namespace", exported: "x", source: "a" },
     ]);
   });
 });
@@ -157,5 +165,11 @@ suite("variable declarations", () => {
   test("var declaration", () => {
     const { code } = compile("var x = 42");
     assert.strictEqual(code, "var x = 42");
+  });
+});
+
+suite("parse errors", () => {
+  test.expectFailure("invalid syntax", () => {
+    compile("conts fda = 1;");
   });
 });

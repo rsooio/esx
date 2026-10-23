@@ -68,15 +68,18 @@ export function compile(source: string) {
     },
     ExportNamedDeclaration(node) {
       const { declaration, specifiers } = node;
+      const base = {
+        type: "named",
+        ...(node.source && { source: node.source.value as string }),
+      } as const;
       if (!declaration) {
         // export { foo, bar } | export { foo, bar } from "module"
         replace(node, "");
         exports.push(
           ...specifiers.map((s): Exported => ({
-            type: "named",
+            ...base,
             exported: nameof(s.exported),
             local: nameof(s.local),
-            source: node.source?.value as string,
           }))
         );
       } else if (declaration.type === "VariableDeclaration") {
@@ -89,22 +92,16 @@ export function compile(source: string) {
             if (id.type !== "Identifier") {
               throw new Error("Only simple variable declarations are supported");
             }
-            return {
-              type: "named",
-              exported: id.name,
-              local: id.name,
-              source: node.source?.value as string,
-            };
+            return { ...base, exported: id.name, local: id.name };
           })
         );
       } else {
         // export function foo() {} | export class Foo {}
         replace({ start: node.start, end: declaration.start });
         exports.push({
-          type: "named",
+          ...base,
           exported: declaration.id.name,
           local: declaration.id.name,
-          source: node.source?.value as string,
         });
       }
     },
