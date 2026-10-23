@@ -1,12 +1,22 @@
 import { Session } from "node:inspector";
 import { createContext, type Context } from "node:vm";
 import { compile } from "./transform.ts";
+import { resolve } from "./package.ts";
 
 const session = new Session();
 session.connect();
 session.post("Runtime.enable");
 
 const namespaces = new Map<string, Namespace>();
+
+function getNamespace(id: string): Namespace {
+  let ns = namespaces.get(id);
+  if (!ns) {
+    ns = new Namespace();
+    namespaces.set(id, ns);
+  }
+  return ns;
+}
 
 class Namespace {
   readonly id!: number;
@@ -21,18 +31,53 @@ class Namespace {
     this.context = createContext({});
   }
 
-  eval(source: string): unknown {
+  async eval(source: string, cb: (err: Error | null, result?: any) => void) {
     const { code, imports, exports } = compile(source);
-    imports.forEach((i) => {
-      // TODO: link imports to other namespaces
-    });
+    await Promise.all(
+      imports.map(async (i) => {
+        if (!i.source.startsWith("./")) {
+          const module = await import(i.source);
+          if (i.type === "namespace") {
+            this.context[i.local] = module;
+          } else if (i.type === "default") {
+            this.context[i.local] = module.default;
+          } else if (i.type === "named") {
+            this.context[i.local] = module[i.imported];
+          }
+        } else {
+          const ns = getNamespace(i.source);
+          resolve(i.source)
+          // TODO: execute the source if it hasn't been executed yet
+          if (i.type === "namespace") {
+            this.context[i.local] = getNamespace(i.source).namespace;
+          } else if (i.type === "default" || i.type === "named") {
+            ns.link(i.type === "named" ? i.imported : "default", (value) => {
+              this.context[i.local] = value;
+            });
+          }
+        }
+      })
+    );
+    // return session.post("Runtime.evaluate", {
+    //   expression: code,
+    //   contextId: this.id,
+    //   returnByValue: true,
+    // });
     exports.forEach((e) => {
-      // TODO: update namespace with exports
-    });
-    return session.post("Runtime.evaluate", {
-      expression: code,
-      contextId: this.id,
-      returnByValue: true,
+      if (e.type === "namespace") {
+        this.namespace[e.exported] = getNamespace(e.source).namespace;
+      } else if (e.type === "default") {
+        this.namespace["default"] = this.context[e.local];
+      } else if (e.type === "named" && e.source === undefined) {
+        this.namespace[e.exported] = this.context[e.local];
+      } else if (e.type === "named" && e.source !== undefined) {
+        getNamespace(e.source).link(e.local, (value) => {
+          this.namespace[e.exported] = value;
+        });
+      } else if (e.type === "all") {
+        // TODO: auto-update when the source namespace changes
+        Object.assign(this.namespace, getNamespace(e.source).namespace);
+      }
     });
   }
 
