@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
+  "bin": "cli.ts",
   "scripts": {
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage"
