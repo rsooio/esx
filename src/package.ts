@@ -26,14 +26,13 @@ function findSourceFile(dir: string, name: string) {
   const filename = [".ts", ".js"]
     .map((ext) => `${name}${ext}`)
     .find((file) => files.includes(file));
-  if (!filename) throw new Error(`File not found: ${join(dir, name)}`);
-  return join(dir, filename);
+  if (filename) return join(dir, filename);
 }
 
-export function resolve(specifier: string) {
-  const [name, path] = specifier.split("/", 2);
+export function resolve(source: string, parent?: string) {
+  const [name, path] = source.split("/", 2);
   const pkg = packages.get(name);
-  if (!pkg) throw new Error(`Package not found: ${name}`);
+  if (!pkg) return;
   const resolved = path ? join(pkg.path, path) : pkg.path;
   try {
     const stat = fs.statSync(resolved);
@@ -42,4 +41,37 @@ export function resolve(specifier: string) {
   } catch {
     return findSourceFile(dirname(resolved), basename(resolved));
   }
+}
+
+function resolvePackage(source: string) {
+  let pkg: Package | undefined;
+  for (const candidate of packages.values()) {
+    const { name } = candidate;
+    if (source !== name && !source.startsWith(name + "/")) continue;
+    if (!pkg || name.length > pkg.name.length) pkg = candidate;
+  }
+  if (!pkg) return;
+  if (source === pkg.name) return pkg.path;
+  return join(pkg.path, source.slice(pkg.name.length + 1));
+}
+
+function _resolve(source: string, parent?: string) {
+  if (!source.startsWith("./") && !source.startsWith("../")) {
+    return source;
+  }
+  if (!parent) {
+    throw new Error(`Cannot resolve relative specifier ${source} without a parent`);
+  }
+  return join(parent, "..", source);
+}
+
+export function specifierFromPath(path: string) {
+  // Find the longest matching package path prefix
+  const specifiers = Array.from(packages.values())
+    .filter((pkg) => path.startsWith(pkg.path))
+    .sort((a, b) => b.path.length - a.path.length);
+  if (specifiers.length > 0) {
+    return specifiers[0].name + path.slice(specifiers[0].path.length);
+  }
+  throw new Error(`Path not in any loaded package: ${path}`);
 }

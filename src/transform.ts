@@ -1,42 +1,95 @@
-import { Parser, type Literal } from "acorn";
-import { ancestor } from "acorn-walk";
-
-type Imported =
-  | { type: "namespace"; local: string; source: string }
-  | { type: "default"; local: string; source: string }
-  | { type: "named"; imported: string; local: string; source: string }
-  | { type: "side-effect"; source: string };
-
-type Exported =
-  | { type: "namespace"; exported: string; source: string }
-  | { type: "default"; local: string }
-  | { type: "named"; exported: string; local: string; source?: string }
-  | { type: "all"; source: string };
-
-const parser = Parser.extend((BaseParser) => class extends BaseParser {
-  // @ts-expect-error
-  raiseRecoverable(pos, message) {
-    if (/^Export '.*' is not defined$/.test(message)) {
-      return;
-    }
-    // @ts-expect-error
-    return super.raiseRecoverable(pos, message);
-  }
-});
+import { Parser } from "acorn";
+import type { AnyNode, Identifier, Literal, Pattern } from "acorn";
+import { base } from "acorn-walk";
 
 function nameof(specifier: { name?: string; value?: Literal["value"] }) {
   return specifier.name ?? JSON.stringify(specifier.value);
 }
 
-export function compile(source: string) {
+export function isVariableReference(node: Identifier, ancestors: AnyNode[]) {
+  const [parent] = ancestors;
+  switch (parent?.type) {
+    case "MemberExpression":
+      return parent.object === node || parent.computed;
+    case "Property":
+      return parent.value === node || parent.computed || parent.shorthand;
+    case "CallExpression":
+    case "NewExpression":
+      return parent.callee === node || parent.arguments.includes(node);
+    case "VariableDeclarator":
+      return parent.init === node;
+    case "MethodDefinition":
+    case "PropertyDefinition":
+      return parent.key === node && parent.computed;
+    case "ObjectPattern":
+      return ancestors[1]?.type === "AssignmentExpression";
+    case "FunctionDeclaration": // skipped because it is handled in walk()
+    case "ClassDeclaration":    // skipped because it is handled in walk()
+    case "LabeledStatement":
+    case "BreakStatement":
+    case "ContinueStatement":
+    case "SwitchCase":
+      return false;
+    default:
+      return true;
+  }
+}
+
+export function collectNames(pattern: Pattern | Pattern[]): [string, AnyNode][] {
+  if (Array.isArray(pattern)) return pattern.flatMap(collectNames);
+  switch (pattern.type) {
+    case "Identifier":
+      return [[pattern.name, pattern]];
+    case "ObjectPattern":
+      return pattern.properties.flatMap((prop) =>
+        collectNames(prop.type === "Property" ? prop.value : prop.argument));
+    case "ArrayPattern":
+      return pattern.elements.flatMap((element) =>
+        element ? collectNames(element) : []);
+    case "RestElement":
+      return collectNames(pattern.argument);
+    case "AssignmentPattern":
+      return collectNames(pattern.left);
+    case "MemberExpression":
+      return [];
+  }
+}
+
+export const parser = Parser.extend((BaseParser) => class extends BaseParser {
+  raiseRecoverable(pos: number, message: string) {
+    if (/^Export '.*' is not defined$/.test(message)) return;
+    // @ts-expect-error override
+    return super.raiseRecoverable(pos, message);
+  }
+});
+
+const info = Symbol("info");
+
+type ScopeInfo = {
+  children: Scope[];
+  type: "block" | "function" | "global";
+};
+
+type Scope = Record<string, AnyNode> & { [info]: ScopeInfo };
+type Variables = Record<string, string>;
+
+const DEFAULT_VARIABLES = Object.getOwnPropertyNames(globalThis);
+
+export function compile(source: string, id: string, variables: Variables = {}) {
   const ast = parser.parse(source, {
     ecmaVersion: "latest",
     sourceType: "module",
     allowAwaitOutsideFunction: true,
   });
 
-  const exports: Exported[] = [];
-  const imports: Imported[] = [];
+  function val(name: string, node?: { start: number; end: number }) {
+    if (node === undefined) return `val("${id}", "${name}")`;
+    return `val("${id}", "${name}", ${source.slice(node.start, node.end)})`;
+  }
+
+  function def(name: string, { start, end }: { start: number; end: number }) {
+    return `def("${id}", "${name}", ${source.slice(start, end)})`;
+  }
 
   const edits: { start: number; end: number; text: string }[] = [];
 
@@ -44,102 +97,92 @@ export function compile(source: string) {
     edits.push({ start: node.start, end: node.end ?? node.start, text });
   }
 
-  ancestor(ast, {
-    ImportDeclaration(node) {
-      const source = node.source.value as string;
-      const items = node.specifiers.map((s): Imported => {
-        const base = { local: s.local.name, source };
-        switch (s.type) {
-          case "ImportNamespaceSpecifier":
-            return { ...base, type: "namespace" };
-          case "ImportDefaultSpecifier":
-            return { ...base, type: "default" };
-          case "ImportSpecifier":
-            return { ...base, type: "named", imported: nameof(s.imported) };
+  function assign(scope: Scope, pattern: Pattern | Pattern[], hoist = false) {
+    if (hoist && scope[info].type === "block") {
+      return assign(Object.getPrototypeOf(scope), pattern, hoist);
+    }
+    return Object.assign(scope, Object.fromEntries(collectNames(pattern)));
+  }
+
+  function create(type: ScopeInfo["type"], parent?: Scope): Scope {
+    const scope: Scope = Object.create(parent || null);
+    scope[info] = { type, children: [] };
+    if (parent) parent[info].children.push(scope);
+    return scope;
+  }
+
+  function walk(node: AnyNode, scope: Scope, ancestors: AnyNode[] = []) {
+    switch (node.type) {
+      case "FunctionDeclaration":
+        if (node.id) {
+          scope[node.id.name] = node;
+          if (ancestors.length === 1) replace(node, def(node.id.name, node));
         }
-      });
-      if (!items.length) items.push({ type: "side-effect", source });
-      imports.push(...items);
-      replace(node);
-    },
-    ImportExpression(node) {
-      // TODO: inject auto update code for dynamic import
-      replace({ start: node.start }, "__");
-    },
-    ExportNamedDeclaration(node) {
-      const { declaration, specifiers } = node;
-      const base = {
-        type: "named",
-        ...(node.source && { source: node.source.value as string }),
-      } as const;
-      if (!declaration) {
-        // export { foo, bar } | export { foo, bar } from "module"
-        replace(node, "");
-        exports.push(
-          ...specifiers.map((s): Exported => ({
-            ...base,
-            exported: nameof(s.exported),
-            local: nameof(s.local),
-          }))
-        );
-      } else if (declaration.type === "VariableDeclaration") {
-        // export const foo = 42 | export let bar = 43
-        const { start, kind } = declaration;
-        replace({ start: node.start, end: start });
-        replace({ start, end: start + kind.length }, "var");
-        exports.push(
-          ...declaration.declarations.map(({ id }): Exported => {
-            if (id.type !== "Identifier") {
-              throw new Error("Only simple variable declarations are supported");
+      case "FunctionExpression":
+      case "ArrowFunctionExpression":
+        scope = assign(create("function", scope), node.params);
+        node = node.body;
+        break;
+      case "ClassDeclaration":
+        if (node.id) scope[node.id.name] = node;
+      case "ClassExpression":
+        node = node.body;
+        break;
+      case "SwitchStatement":
+      case "BlockStatement":
+        scope = create("block", scope);
+        break;
+      case "VariableDeclaration":
+        const patterns = node.declarations.map((decl) => decl.id);
+        scope = assign(scope, patterns, node.kind === "var");
+        if (ancestors.length === 1) {
+          replace(node, "");
+          // replace({ ...node, end: node.start + node.kind.length }, "");
+          node.declarations.forEach((decl) => {
+            if (decl.id.type === "Identifier") {
+              if (decl.init) {
+                replace({ start: node.start }, def(decl.id.name, decl.init));
+              }
             }
-            return { ...base, exported: id.name, local: id.name };
-          })
-        );
-      } else {
-        // export function foo() {} | export class Foo {}
-        replace({ start: node.start, end: declaration.start });
-        exports.push({
-          ...base,
-          exported: declaration.id.name,
-          local: declaration.id.name,
+            // TODO: handle destructuring
+          });
+        }
+        break;
+      case "Identifier":
+        if (!isVariableReference(node, ancestors)) break;
+        if (node.name in variables) {
+          replace(node, variables[node.name]);
+          break;
+        }
+        if (DEFAULT_VARIABLES.includes(node.name)) break;
+        if (node.name in scope) break;
+        replace(node, val(node.name));
+        break;
+      case "ImportDeclaration":
+        const { source } = node;
+        replace(node, `await __import("${id}", "${source.value}")`);
+        node.specifiers.forEach((s) => {
+          if (s.type === "ImportSpecifier") {
+            variables[s.local.name] = val(nameof(s.imported), source);
+          } else if (s.type === "ImportDefaultSpecifier") {
+            variables[s.local.name] = val("default", source);
+          } else if (s.type === "ImportNamespaceSpecifier") {
+            variables[s.local.name] = val("*", source);
+          }
         });
-      }
-    },
-    ExportDefaultDeclaration(node) {
-      // export default foo | export default function foo() {}
-      const { declaration } = node;
-      if (declaration.type === "Identifier") {
-        replace(node);
-        exports.push({ type: "default", local: declaration.name });
-      } else {
-        // export default 42 | export default "foo" | export default { bar: 43 }
-        const name = "__default_export__";
-        replace({ start: node.start, end: declaration.start }, `var ${name} = `);
-        exports.push({ type: "default", local: name });
-      }
-    },
-    ExportAllDeclaration(node) {
-      replace(node, "");
-      const source = node.source.value as string;
-      exports.push(
-        node.exported
-          ? { type: "namespace", exported: nameof(node.exported), source }
-          : { type: "all", source }
-      );
-    },
-    VariableDeclaration(node, _state, ancestors) {
-      if (ancestors.length !== 2) return;
-      const { start, kind } = node;
-      if (kind === "const" || kind === "let") {
-        replace({ start, end: start + kind.length }, "var");
-      }
-    },
-  });
+        break;
+    }
+    // @ts-expect-error base is a recursive walker
+    base[node.type](node, null, (n) => walk(n, scope, [node, ...ancestors]));
+  }
+
+  const scope = create("global");
+  walk(ast, scope);
 
   edits.sort((a, b) => b.start - a.start);
   edits.forEach(({ start, end, text }) => {
     source = source.slice(0, start) + text + source.slice(end);
   });
 
-  return { code: source, imports, exports }
+  return { scope, code: source };
 }
