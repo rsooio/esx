@@ -1,3 +1,7 @@
 #!/usr/bin/env node
 
-import "./src/index.ts";
+if (process.argv.includes("--server")) {
+  await import("./src/server.ts");
+} else {
+  await import("./src/index.ts");
+}

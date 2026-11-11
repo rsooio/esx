@@ -8,7 +8,8 @@
   "scripts": {
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "server": "node cli.ts --server"
   },
   "dependencies": {
     "acorn": "^8.15.0",

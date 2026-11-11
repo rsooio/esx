@@ -12,8 +12,12 @@ console.log("Type .help for more information.");
 const repl = start({
   prompt: "",
   preview: false,
-  completer: (line, callback) => callback(null, [[], line]),
-});
+  completer: (line: string, callback: any) => callback(null, [[], line]),
+  handleError(error: any) {
+    console.log(error instanceof Error ? error.message : String(error));
+    return "ignore";
+  },
+} as any);
 
 const originalEval = repl.eval.bind(repl);
 const runtime = new Runtime({

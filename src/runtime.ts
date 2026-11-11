@@ -1,15 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { compile } from "./transform.ts";
-import { PassThrough } from "node:stream";
 import type { Context } from "node:vm";
-
-const pass = new PassThrough();
 
 export type Namespace = {
   id: string;
   scope: Record<string, any>;
   variables: Record<string, string>;
-  exports: Record<string, string>;
+  exports: Record<string, any>;
 }
 
 type RuntimeOptions = {
@@ -24,6 +21,8 @@ export class Runtime {
   constructor(options: RuntimeOptions) {
     options.context.val = this.val.bind(this);
     options.context.def = this.def.bind(this);
+    options.context.set = this.set.bind(this);
+    options.context.__import = this.import.bind(this);
     this.options = options;
   }
 
@@ -35,6 +34,10 @@ export class Runtime {
 
   vals(id: string) {
     return this.ns(id).scope;
+  }
+
+  list() {
+    return [...this.namespaces.keys()].sort();
   }
 
   resolve(id: string, source: string) {
@@ -66,30 +69,37 @@ export class Runtime {
   }
 
   private val(id: string, name: string, source?: string) {
-    // TODO: destructuring
     if (source === undefined) {
-      if (!this.ns(id).scope.hasOwnProperty(name)) {
+      if (!Object.prototype.hasOwnProperty.call(this.ns(id).scope, name)) {
         throw new Error(`Variable ${name} is not defined in namespace ${id}`);
       }
       return this.ns(id).scope[name];
     }
-    // FIXME: exports is a name mapping, not a value mapping
-    return this.ns(this.resolve(id, source)).exports[name];
+    const ns = this.ns(this.resolve(id, source));
+    if (name === "*") return ns.scope;
+    return ns.exports[name] ?? ns.scope[name];
   }
 
   private def(id: string, name: string, value: any) {
-    // TODO: export
-    this.ns(id).scope[name] = value;
+    const ns = this.ns(id);
+    ns.scope[name] = value;
+    ns.exports[name] = value;
+  }
+
+  private set(id: string, name: string, value: any) {
+    this.def(id, name, value);
+    return value;
   }
 
   private async import(id: string, source: string) {
     const resolved = this.resolve(id, source);
-    if (this.namespaces.has(resolved)) return;
-    if (!resolved.startsWith("file://")) {
-      const module = await import(resolved);
-      const ns = this.ns(resolved);
-      ns.scope = module;
-      Object.keys(module).forEach((key) => ns.exports[key] = key);
-    }
+    const ns = this.ns(resolved);
+    if (Object.keys(ns.scope).length > 0) return ns.scope;
+    const module = await import(resolved);
+    ns.scope = module;
+    Object.keys(module).forEach((key) => {
+      ns.exports[key] = module[key];
+    });
+    return module;
   }
 }
