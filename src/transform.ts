@@ -286,6 +286,14 @@ export function compile(source: string, id: string, variables: Variables = {}) {
         });
         break;
       }
+      case "ImportExpression": {
+        replace(
+          { start: node.start, end: node.source.start },
+          `__importDynamic(${JSON.stringify(id)}, `,
+        );
+        walk(node.source, scope, [node, ...ancestors], false);
+        return;
+      }
       case "ExportNamedDeclaration":
         if (node.declaration) {
           replace({ start: node.start, end: node.declaration.start });

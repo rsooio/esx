@@ -23,6 +23,7 @@ export class Runtime {
     options.context.def = this.def.bind(this);
     options.context.set = this.set.bind(this);
     options.context.__import = this.import.bind(this);
+    options.context.__importDynamic = this.import.bind(this);
     this.options = options;
   }
 

@@ -12,12 +12,13 @@ console.log("Type .help for more information.");
 const repl = start({
   prompt: "",
   preview: false,
-  completer: (line: string, callback: any) => callback(null, [[], line]),
-  handleError(error: any) {
+  completer: (line, callback) => callback(null, [[], line]),
+  handleError(error) {
     console.log(error instanceof Error ? error.message : String(error));
+    repl.displayPrompt();
     return "ignore";
   },
-} as any);
+});
 
 const originalEval = repl.eval.bind(repl);
 const runtime = new Runtime({
@@ -31,6 +32,7 @@ const runtime = new Runtime({
   },
 });
 (repl.eval as typeof originalEval) = (cmd, _context, _file, callback) => {
+  if (cmd === "\n") return repl.displayPrompt();
   runtime.eval(cmd, ns)
     .then((result) => callback(null, result))
     .catch((err) => callback(err, undefined));
