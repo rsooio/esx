@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { compile } from "./transform.ts";
+import { join } from "node:path";
+import * as nodeModule from "node:module";
+import { pathToFileURL } from "node:url";
 import type { Context } from "node:vm";
+import { compile } from "./transform.ts";
 
 export type Namespace = {
   id: string;
@@ -13,6 +16,45 @@ type RuntimeOptions = {
   context: Context;
   eval(cmd: string, file: string): Promise<any>;
 }
+
+const MODULES_SCHEME = "esx-modules://";
+const registerHooks = (nodeModule as any).registerHooks as
+  | ((hooks: {
+      resolve(
+        specifier: string,
+        context: any,
+        nextResolve: (specifier: string, context: any) => any,
+      ): any;
+    }) => void)
+  | undefined;
+
+let hooksRegistered = false;
+
+function registerModuleHooks() {
+  if (hooksRegistered || typeof registerHooks !== "function") return;
+  hooksRegistered = true;
+  registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (!specifier.startsWith(MODULES_SCHEME)) {
+        return nextResolve(specifier, context);
+      }
+
+      const url = new URL(specifier);
+      const realSpecifier = url.searchParams.get("specifier");
+      const parentURL = url.searchParams.get("parentURL");
+      if (!realSpecifier) {
+        return nextResolve(specifier, context);
+      }
+
+      return nextResolve(realSpecifier, {
+        ...context,
+        parentURL: parentURL ?? context.parentURL,
+      });
+    },
+  });
+}
+
+registerModuleHooks();
 
 export class Runtime {
   private readonly options: RuntimeOptions;
@@ -76,7 +118,7 @@ export class Runtime {
       }
       return this.ns(id).scope[name];
     }
-    const ns = this.ns(this.resolve(id, source));
+    const ns = this.ns(this.moduleId(id, source));
     if (name === "*") return ns.scope;
     return ns.exports[name] ?? ns.scope[name];
   }
@@ -93,14 +135,51 @@ export class Runtime {
   }
 
   private async import(id: string, source: string) {
-    const resolved = this.resolve(id, source);
-    const ns = this.ns(resolved);
+    const key = this.moduleId(id, source);
+    const ns = this.ns(key);
     if (Object.keys(ns.scope).length > 0) return ns.scope;
-    const module = await import(resolved);
+
+    const resolved = this.resolve(id, source);
+    const direct =
+      resolved.startsWith("file://") ||
+      resolved.startsWith("node:") ||
+      resolved.startsWith("data:") ||
+      typeof registerHooks !== "function";
+
+    const specifier = direct
+      ? resolved
+      : this.modulesSpecifier(id, resolved);
+
+    const module = await import(specifier);
     ns.scope = module;
-    Object.keys(module).forEach((key) => {
-      ns.exports[key] = module[key];
+    Object.keys(module).forEach((name) => {
+      ns.exports[name] = module[name];
     });
     return module;
+  }
+
+  private parentURL(id: string) {
+    return id.startsWith("file://")
+      ? id
+      : pathToFileURL(join(process.cwd(), "__esx__.js")).href;
+  }
+
+  private moduleId(id: string, source: string) {
+    const resolved = this.resolve(id, source);
+    if (
+      resolved.startsWith("file://") ||
+      resolved.startsWith("node:") ||
+      resolved.startsWith("data:")
+    ) {
+      return resolved;
+    }
+    return `${this.parentURL(id)}|${resolved}`;
+  }
+
+  private modulesSpecifier(id: string, source: string) {
+    const url = new URL(MODULES_SCHEME + "resolve");
+    url.searchParams.set("parentURL", this.parentURL(id));
+    url.searchParams.set("specifier", source);
+    return url.href;
   }
 }

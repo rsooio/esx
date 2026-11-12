@@ -1,6 +1,7 @@
 import { Parser } from "acorn";
 import type { AnyNode, Identifier, Literal, Pattern } from "acorn";
 import { base } from "acorn-walk";
+import { stripTypeScriptTypes } from "node:module";
 
 function nameof(specifier: { name?: string; value?: Literal["value"] }) {
   return specifier.name ?? JSON.stringify(specifier.value);
@@ -111,6 +112,8 @@ type Variables = Record<string, string>;
 const DEFAULT_VARIABLES = [...Object.getOwnPropertyNames(globalThis), "require"];
 
 export function compile(source: string, id: string, variables: Variables = {}) {
+  source = stripTypeScriptTypes(source);
+
   const ast = parser.parse(source, {
     ecmaVersion: "latest",
     sourceType: "module",

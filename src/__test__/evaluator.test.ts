@@ -1,4 +1,8 @@
 import { strict as assert } from "node:assert";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { suite, test } from "node:test";
 import { Evaluator } from "../evaluator.ts";
 import { Runtime } from "../runtime.ts";
@@ -92,6 +96,77 @@ suite("evaluator", () => {
       assert.match(await runtime.eval("({ a: 1, b: [2, 3] })", "user"), /\{ a: 1, b: \[ 2, 3 \] \}/);
     } finally {
       evaluator.dispose();
+    }
+  });
+
+  test("resolves bare packages and #imports from the file parent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "esx-import-"));
+    try {
+      await mkdir(join(dir, "node_modules/foo/sub"), { recursive: true });
+      await mkdir(join(dir, "src"), { recursive: true });
+      await writeFile(
+        join(dir, "package.json"),
+        JSON.stringify({
+          name: "esx-import-test",
+          type: "module",
+          imports: { "#alias": "./src/alias.js" },
+        }),
+      );
+      await writeFile(
+        join(dir, "node_modules/foo/package.json"),
+        JSON.stringify({
+          name: "foo",
+          type: "module",
+          exports: {
+            ".": { import: "./index.js", require: "./cjs.cjs" },
+            "./sub": "./sub/index.js",
+          },
+        }),
+      );
+      await writeFile(
+        join(dir, "node_modules/foo/index.js"),
+        "export const value = 42;\n",
+      );
+      await writeFile(
+        join(dir, "node_modules/foo/cjs.cjs"),
+        "module.exports = { value: 99 };\n",
+      );
+      await writeFile(
+        join(dir, "node_modules/foo/sub/index.js"),
+        "export const sub = 1;\n",
+      );
+      await writeFile(
+        join(dir, "src/alias.js"),
+        "export const value = 77;\n",
+      );
+
+      const evaluator = await Evaluator.create({
+        cwd: dir,
+        onOutput() {},
+      });
+      const runtime = new Runtime({
+        context: evaluator.context,
+        eval: (code, file) => evaluator.evaluate(code, file),
+      });
+      const ns = pathToFileURL(join(dir, "src/main.js")).href;
+      try {
+        assert.equal(
+          await runtime.eval('import { value } from "foo"; value', ns),
+          "42",
+        );
+        assert.equal(
+          await runtime.eval('import { value } from "#alias"; value', ns),
+          "77",
+        );
+        assert.equal(
+          await runtime.eval('await import("foo/sub").then(m => m.sub)', ns),
+          "1",
+        );
+      } finally {
+        evaluator.dispose();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
