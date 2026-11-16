@@ -22,6 +22,10 @@ type RemoteObject = {
 
 const OBJECT_GROUP = "esx";
 
+const VM_BUILTINS = new Set(
+  vm.runInNewContext("Object.getOwnPropertyNames(globalThis)"),
+);
+
 /**
  * Server-side evaluator.
  *
@@ -95,7 +99,7 @@ export class Evaluator {
     ]);
 
     for (const key of Object.getOwnPropertyNames(globalThis)) {
-      if (skip.has(key)) continue;
+      if (VM_BUILTINS.has(key) || skip.has(key)) continue;
       try {
         sandbox[key] = (globalThis as any)[key];
       } catch {

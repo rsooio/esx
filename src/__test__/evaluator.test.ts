@@ -99,6 +99,29 @@ suite("evaluator", () => {
     }
   });
 
+  test("keeps vm intrinsics consistent with host globals", async () => {
+    const { evaluator, runtime } = await makeRuntime();
+    try {
+      assert.equal(await runtime.eval("[1] instanceof Array", "user"), "true");
+      assert.equal(await runtime.eval("({}) instanceof Object", "user"), "true");
+      assert.equal(
+        await runtime.eval("(() => {}) instanceof Function", "user"),
+        "true",
+      );
+      assert.equal(
+        await runtime.eval(
+          "Object.getPrototypeOf([]) === Array.prototype",
+          "user",
+        ),
+        "true",
+      );
+      assert.equal(await runtime.eval("typeof setTimeout", "user"), "'function'");
+      assert.equal(await runtime.eval("typeof Buffer", "user"), "'function'");
+    } finally {
+      evaluator.dispose();
+    }
+  });
+
   test("resolves bare packages and #imports from the file parent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "esx-import-"));
     try {
