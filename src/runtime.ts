@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import type { Context } from "node:vm";
 import { compile } from "./transform.ts";
 import { modulesSpecifier } from "./module.ts";
+import { basename } from "node:path";
 
 export type Namespace = {
   id: string;
@@ -73,7 +74,7 @@ export class Runtime {
   private val(id: string, name: string, source?: string) {
     if (source === undefined) {
       if (!Object.prototype.hasOwnProperty.call(this.ns(id).scope, name)) {
-        throw new Error(`Variable ${name} is not defined in namespace ${id}`);
+        throw new ReferenceError(`${name} is not defined in ${basename(id)}`);
       }
       return this.ns(id).scope[name];
     }
