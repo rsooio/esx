@@ -1,7 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import * as nodeModule from "node:module";
-import { pathToFileURL } from "node:url";
 import type { Context } from "node:vm";
 import { compile } from "./transform.ts";
 import { modulesSpecifier } from "./module.ts";
@@ -98,14 +95,20 @@ export class Runtime {
 
   private async import(id: string, source: string) {
     const specifier = this.module(id, source);
+    const loaded = this.namespaces.has(specifier);
+    if (loaded) return this.namespaces.get(specifier)!.scope;
     const ns = this.ns(specifier);
-    if (Object.keys(ns.scope).length > 0) return ns.scope;
-    const module = await import(specifier);
-    ns.scope = module;
-    Object.keys(module).forEach((name) => {
-      ns.exports[name] = module[name];
-    });
-    return module;
+    if (specifier.startsWith("file://")) {
+      await this.load(specifier, specifier);
+      return ns.scope;
+    } else {
+      const module = await import(specifier);
+      ns.scope = module;
+      Object.keys(module).forEach((name) => {
+        ns.exports[name] = module[name];
+      });
+      return module;
+    }
   }
 
   private module(id: string, source: string) {

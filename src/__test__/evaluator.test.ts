@@ -122,6 +122,118 @@ suite("evaluator", () => {
     }
   });
 
+  test("loads local modules in the vm context", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "esx-local-"));
+    try {
+      const modulePath = join(dir, "mod.js");
+      await writeFile(
+        modulePath,
+        [
+          'console.log("module loaded");',
+          "export let count = 0;",
+          "export const test = 1;",
+          "export function inc() {",
+          "  count++;",
+          '  console.log("inc called");',
+          "  return count;",
+          "}",
+        ].join("\n"),
+      );
+      const url = pathToFileURL(modulePath).href;
+      const output: { text: string; error: boolean }[] = [];
+      const evaluator = await Evaluator.create({
+        cwd: dir,
+        onOutput(text, error = false) {
+          output.push({ text, error });
+        },
+      });
+      const runtime = new Runtime({
+        context: evaluator.context,
+        eval: (code, file) => evaluator.evaluate(code, file),
+      });
+      try {
+        assert.equal(
+          await runtime.eval(
+            `import { count, test, inc } from ${JSON.stringify(url)}; [count, test, inc(), count]`,
+            "user",
+          ),
+          "[ 0, 1, 1, 1 ]",
+        );
+        assert.deepEqual(output, [
+          { text: "module loaded\n", error: false },
+          { text: "inc called\n", error: false },
+        ]);
+
+        assert.equal(await runtime.eval("export const test = 2", url), "undefined");
+        assert.equal(await runtime.eval("test", url), "2");
+
+        assert.equal(
+          await runtime.eval(
+            `const m = await import(${JSON.stringify(url)}); [m.test, m.count]`,
+            "user",
+          ),
+          "[ 2, 1 ]",
+        );
+        assert.deepEqual(output, [
+          { text: "module loaded\n", error: false },
+          { text: "inc called\n", error: false },
+        ]);
+      } finally {
+        evaluator.dispose();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves local imports from the module URL", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "esx-local-nested-"));
+    try {
+      await writeFile(
+        join(dir, "b.js"),
+        'console.log("b loaded");\nexport const b = 2;\n',
+      );
+      await writeFile(
+        join(dir, "a.js"),
+        'import { b } from "./b.js";\nconsole.log("a loaded");\nexport const a = b + 1;\n',
+      );
+      const url = pathToFileURL(join(dir, "a.js")).href;
+      const output: { text: string; error: boolean }[] = [];
+      const evaluator = await Evaluator.create({
+        cwd: dir,
+        onOutput(text, error = false) {
+          output.push({ text, error });
+        },
+      });
+      const runtime = new Runtime({
+        context: evaluator.context,
+        eval: (code, file) => evaluator.evaluate(code, file),
+      });
+      try {
+        assert.equal(
+          await runtime.eval(`import { a } from ${JSON.stringify(url)}; a`, "user"),
+          "3",
+        );
+        assert.deepEqual(output, [
+          { text: "b loaded\n", error: false },
+          { text: "a loaded\n", error: false },
+        ]);
+        assert.equal(
+          await runtime.eval(`import { a } from ${JSON.stringify(url)}; a`, "user"),
+          "3",
+        );
+        assert.deepEqual(output, [
+          { text: "b loaded\n", error: false },
+          { text: "a loaded\n", error: false },
+        ]);
+      } finally {
+        evaluator.dispose();
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("resolves bare packages and #imports from the file parent", async () => {
     const dir = await mkdtemp(join(tmpdir(), "esx-import-"));
     try {
