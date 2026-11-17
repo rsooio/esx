@@ -1,18 +1,35 @@
 import { start } from "node:repl";
-import { Runtime } from "./runtime.ts";
-
-if (!process.env.DEBUG) {
-  console.debug = () => {};
-}
+import { Realm } from "./realm.ts";
 
 let ns = "user";
 
+const realm = await Realm.start({
+  cwd: process.cwd(),
+  onOutput(text, isError = false) {
+    if (isError) process.stderr.write(text);
+    else process.stdout.write(text);
+  },
+  onExit(code, signal) {
+    console.error(`User realm exited (${code ?? signal ?? "unknown"})`);
+  },
+});
+
 console.log("Welcome to the REPL with namespaces!");
 console.log("Type .help for more information.");
+
 const repl = start({
   prompt: "",
+  useGlobal: true,
   preview: false,
   completer: (line, callback) => callback(null, [[], line]),
+  writer: (value) => value,
+  eval: async (code, _context, _file, callback) => {
+    if (code === "\n") return Promise.resolve(undefined);
+    realm
+      .eval(code, ns)
+      .then((result) => callback(null, result))
+      .catch((error) => callback(error, undefined));
+  },
   handleError(error) {
     console.log(error instanceof Error ? error.message : String(error));
     repl.displayPrompt();
@@ -20,47 +37,36 @@ const repl = start({
   },
 });
 
-const originalEval = repl.eval.bind(repl);
-const runtime = new Runtime({
-  context: repl.context,
-  eval(cmd, file) {
-    return new Promise((resolve, reject) => {
-      originalEval(cmd, repl.context, file, (err, result) => {
-        err ? reject(err) : resolve(result);
-      });
-    });
-  },
-});
-(repl.eval as typeof originalEval) = (cmd, _context, _file, callback) => {
-  if (cmd === "\n") return repl.displayPrompt();
-  runtime.eval(cmd, ns)
-    .then((result) => callback(null, result))
-    .catch((err) => callback(err, undefined));
-}
-
-function switchNamespace(specifier: string) {
+async function switchNamespace(specifier: string) {
   if (!specifier) {
     console.log(`Current namespace: ${ns}`);
   } else {
-    ns = runtime.resolve(ns, specifier);
+    ns = await realm.resolveNamespace(ns, specifier);
     console.log(`Switched to namespace: ${ns}`);
     repl.setPrompt(`${ns}> `);
   }
   repl.displayPrompt();
 }
 
-switchNamespace("user");
 repl.defineCommand("ns", {
   help: "Switch namespace",
-  action: switchNamespace,
+  action(specifier: string) {
+    void switchNamespace(specifier.trim()).catch((error) => {
+      console.log(error instanceof Error ? error.message : String(error));
+      repl.displayPrompt();
+    });
+  },
 });
 
 repl.defineCommand("load", {
   help: "Load a module into the current namespace",
   async action(specifier: string) {
     try {
-      const resolved = runtime.resolve(ns, specifier.trim() || ns);
-      await runtime.load(ns, resolved);
+      const resolved = await realm.resolveNamespace(
+        ns,
+        specifier.trim() || ns,
+      );
+      await realm.load(resolved, ns);
       console.log(`Loaded module: ${resolved}`);
     } catch (err) {
       console.log(err instanceof Error ? err.message : String(err));
@@ -71,21 +77,30 @@ repl.defineCommand("load", {
 
 repl.defineCommand("vars", {
   help: "List variables in the current namespace",
-  action() {
-    if (!ns) {
-      console.log("No namespace selected");
-      this.displayPrompt();
-      return;
-    }
-    const vars = Object.keys(runtime.vals(ns)).sort();
-    if (vars.length === 0) {
-      console.log("No variables in the current namespace");
-    } else {
-      console.log("Variables in the current namespace:");
-      for (const v of vars) {
-        console.log(`- ${v}`);
+  async action() {
+    try {
+      const vars = await realm.listVariables(ns);
+      if (vars.length === 0) {
+        console.log("No variables in the current namespace");
+      } else {
+        console.log("Variables in the current namespace:");
+        for (const v of vars) {
+          console.log(`- ${v}`);
+        }
       }
+    } catch (error) {
+      console.log(error instanceof Error ? error.message : String(error));
     }
     this.displayPrompt();
   },
 });
+
+repl.on("exit", () => {
+  void realm.stop().finally(() => process.exit(0));
+});
+
+process.on("exit", () => {
+  realm.kill();
+});
+
+await switchNamespace("user");

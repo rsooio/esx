@@ -1,11 +1,5 @@
-import { pathToFileURL } from "node:url";
 import { format } from "node:util";
-import { Runtime } from "./runtime.ts";
-import { Evaluator } from "./evaluator.ts";
-
-if (!process.env.DEBUG) {
-  console.debug = () => {};
-}
+import { Realm } from "./realm.ts";
 
 type Request = {
   id?: string | number;
@@ -39,14 +33,14 @@ function errorInfo(error: any) {
   };
 }
 
-const evaluator = await Evaluator.create({
+const realm = await Realm.start({
   cwd: process.cwd(),
-  onOutput: output,
-});
-
-const runtime = new Runtime({
-  context: evaluator.context,
-  eval: (code, file) => evaluator.evaluate(code, file),
+  onOutput(text, isError = false) {
+    output(text, isError);
+  },
+  onExit(code, signal) {
+    output(`user realm exited (${code ?? signal ?? "unknown"})\n`, true);
+  },
 });
 
 let queue: Promise<unknown> = Promise.resolve();
@@ -65,7 +59,7 @@ async function evaluate(request: Request) {
   const ns = typeof request.ns === "string" && request.ns ? request.ns : "user";
   currentId = id === undefined ? null : String(id);
   try {
-    const value = await runtime.eval(String(request.code ?? ""), ns);
+    const value = await realm.eval(String(request.code ?? ""), ns);
     send({ id, status: ["done"], value, ns });
   } catch (error) {
     send({ id, status: ["eval-error", "done"], ex: errorInfo(error), ns });
@@ -80,13 +74,58 @@ async function loadFile(request: Request) {
   currentId = id === undefined ? null : String(id);
   try {
     const path = String(request.path ?? "");
-    const url = pathToFileURL(path).href;
-    await runtime.load(ns, url);
+    await realm.load(path, ns);
     send({ id, status: ["done"], ns });
   } catch (error) {
     send({ id, status: ["eval-error", "done"], ex: errorInfo(error), ns });
   } finally {
     currentId = null;
+  }
+}
+
+async function listNamespaces(request: Request) {
+  try {
+    const namespaces = new Set(["user", ...(await realm.listNamespaces())]);
+    send({
+      id: request.id,
+      status: ["done"],
+      namespaces: [...namespaces].sort(),
+    });
+  } catch (error) {
+    send({
+      id: request.id,
+      status: ["eval-error", "done"],
+      ex: errorInfo(error),
+    });
+  }
+}
+
+async function listVariables(request: Request) {
+  try {
+    const ns = typeof request.ns === "string" && request.ns ? request.ns : "user";
+    const vars = await realm.listVariables(ns);
+    send({ id: request.id, status: ["done"], vars: vars.sort() });
+  } catch (error) {
+    send({
+      id: request.id,
+      status: ["eval-error", "done"],
+      ex: errorInfo(error),
+    });
+  }
+}
+
+async function switchNamespace(request: Request) {
+  try {
+    const ns = typeof request.ns === "string" && request.ns ? request.ns : "user";
+    const specifier = String(request.specifier ?? "");
+    const resolved = await realm.resolveNamespace(ns, specifier);
+    send({ id: request.id, status: ["done"], ns: resolved });
+  } catch (error) {
+    send({
+      id: request.id,
+      status: ["eval-error", "done"],
+      ex: errorInfo(error),
+    });
   }
 }
 
@@ -101,25 +140,21 @@ function handle(request: Request) {
     case "load-file":
       void enqueue(() => loadFile(request));
       break;
-    case "ns-list": {
-      const namespaces = new Set(["user", ...runtime.list()]);
-      send({ id: request.id, status: ["done"], namespaces: [...namespaces].sort() });
+    case "ns-list":
+      void enqueue(() => listNamespaces(request));
       break;
-    }
-    case "ns-vars": {
-      const ns = typeof request.ns === "string" && request.ns ? request.ns : "user";
-      send({ id: request.id, status: ["done"], vars: Object.keys(runtime.vals(ns)).sort() });
+    case "ns-vars":
+      void enqueue(() => listVariables(request));
       break;
-    }
-    case "switch-ns": {
-      const ns = typeof request.ns === "string" && request.ns ? request.ns : "user";
-      const specifier = String(request.specifier ?? "");
-      send({ id: request.id, status: ["done"], ns: runtime.resolve(ns, specifier) });
+    case "switch-ns":
+      void enqueue(() => switchNamespace(request));
       break;
-    }
     case "quit":
       send({ id: request.id, status: ["done"] });
-      process.exit(0);
+      void realm.stop().then(
+        () => process.exit(0),
+        () => process.exit(0),
+      );
       break;
     default:
       send({
@@ -150,8 +185,6 @@ process.stdin.on("data", (chunk) => {
   }
 });
 
-// Async user code can reject outside the eval Promise; surface it in the
-// transcript instead of letting the process die.
 process.on("unhandledRejection", (reason) => {
   output(`unhandledRejection: ${format(reason)}\n`, true);
 });
@@ -163,6 +196,7 @@ send({
   op: "hello",
   version: 1,
   pid: process.pid,
+  realm: realm.info.pid,
   node: process.version,
   cwd: process.cwd(),
 });

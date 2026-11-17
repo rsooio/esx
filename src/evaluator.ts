@@ -2,12 +2,10 @@ import { Session } from "node:inspector";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { format, inspect } from "node:util";
-import vm from "node:vm";
+import { inspect } from "node:util";
 
 export type EvaluatorOptions = {
   cwd: string;
-  onOutput(text: string, isError?: boolean): void;
 };
 
 type RemoteObject = {
@@ -22,9 +20,14 @@ type RemoteObject = {
 
 const OBJECT_GROUP = "esx";
 
-const VM_BUILTINS = new Set(
-  vm.runInNewContext("Object.getOwnPropertyNames(globalThis)"),
-);
+function inspectValue(value: any) {
+  return inspect(value, {
+    colors: false,
+    depth: 4,
+    maxArrayLength: 100,
+    breakLength: 100,
+  });
+}
 
 /**
  * Server-side evaluator.
@@ -35,12 +38,10 @@ const VM_BUILTINS = new Set(
  * an async IIFE or `processTopLevelAwait`.
  */
 export class Evaluator {
-  context!: vm.Context;
+  context!: Record<string, any>;
 
   private readonly options: EvaluatorOptions;
   private readonly session: Session;
-  private readonly sandbox: Record<string, any>;
-  private contextId = 0;
 
   static async create(options: EvaluatorOptions) {
     const evaluator = new Evaluator(options);
@@ -51,119 +52,13 @@ export class Evaluator {
   private constructor(options: EvaluatorOptions) {
     this.options = options;
     this.session = new Session();
-    this.sandbox = this.createSandbox();
   }
 
   private async initialize() {
     this.session.connect();
     await this.post("Runtime.enable");
-
-    const created = new Promise<number>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("Timed out creating the inspector context")),
-        5000,
-      );
-      const onCreated = ({
-        params,
-      }: {
-        params: { context: { id: number; auxData?: { isDefault?: boolean } } };
-      }) => {
-        if (params.context.auxData?.isDefault) return;
-        clearTimeout(timer);
-        (this.session as any).removeListener(
-          "Runtime.executionContextCreated",
-          onCreated,
-        );
-        resolve(params.context.id);
-      };
-      (this.session as any).on("Runtime.executionContextCreated", onCreated);
-    });
-
-    // `vm.createContext` triggers `Runtime.executionContextCreated`.
-    this.context = vm.createContext(this.sandbox);
-    this.contextId = await created;
-
-    // `global` is a REPL convenience, not a vm intrinsic.
-    this.context.global = this.context;
-  }
-
-  private createSandbox() {
-    const sandbox: Record<string, any> = {};
-    const skip = new Set([
-      "globalThis",
-      "global",
-      "console",
-      "process",
-      "localStorage",
-      "sessionStorage",
-    ]);
-
-    for (const key of Object.getOwnPropertyNames(globalThis)) {
-      if (VM_BUILTINS.has(key) || skip.has(key)) continue;
-      try {
-        sandbox[key] = (globalThis as any)[key];
-      } catch {
-        // Some globals are lazy getters that may throw in this context.
-      }
-    }
-
-    sandbox.console = this.createConsole();
-    sandbox.process = this.createProcess();
-    sandbox.__esxInspect = (value: any) =>
-      inspect(value, {
-        colors: false,
-        depth: 4,
-        maxArrayLength: 100,
-        breakLength: 100,
-      });
-    sandbox.global = sandbox;
-    sandbox.module = { exports: {} };
-    sandbox.exports = sandbox.module.exports;
-
-    return sandbox;
-  }
-
-  private createConsole() {
-    const emit = (text: string, isError = false) => {
-      this.options.onOutput(text, isError);
-    };
-
-    return {
-      log: (...args: any[]) => emit(format(...args) + "\n"),
-      info: (...args: any[]) => emit(format(...args) + "\n"),
-      debug: (...args: any[]) => emit(format(...args) + "\n"),
-      warn: (...args: any[]) => emit(format(...args) + "\n", true),
-      error: (...args: any[]) => emit(format(...args) + "\n", true),
-      dir: (value: any, options?: any) =>
-        emit(inspect(value, { colors: false, ...options }) + "\n"),
-      table: (value: any) => emit(inspect(value, { colors: false }) + "\n"),
-      trace: (...args: any[]) => emit("Trace: " + format(...args) + "\n", true),
-      assert: (condition: any, ...args: any[]) => {
-        if (!condition) emit("Assertion failed: " + format(...args) + "\n", true);
-      },
-    };
-  }
-
-  private createProcess() {
-    const emit = (text: string, isError: boolean) => {
-      this.options.onOutput(text, isError);
-    };
-    const stream = (isError: boolean) => ({
-      isTTY: false,
-      write(chunk: any) {
-        emit(String(chunk), isError);
-        return true;
-      },
-    });
-
-    return new Proxy(process, {
-      get(target, property) {
-        if (property === "stdout") return stream(false);
-        if (property === "stderr") return stream(true);
-        const value = Reflect.get(target, property, target);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
+    this.context = globalThis as Record<string, any>;
+    this.context.__esxInspect = inspectValue;
   }
 
   async evaluate(code: string, filename = "user") {
@@ -187,7 +82,6 @@ export class Evaluator {
         awaitPromise: false,
         replMode: true,
         throwOnSideEffect: false,
-        contextId: this.contextId,
       });
 
       if (response.result?.subtype === "promise") {

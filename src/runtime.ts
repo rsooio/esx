@@ -1,8 +1,13 @@
 import { readFile } from "node:fs/promises";
-import type { Context } from "node:vm";
 import { compile } from "./transform.ts";
 import { modulesSpecifier } from "./module.ts";
 import { basename } from "node:path";
+
+const arraySort = Array.prototype.sort;
+const arrayForEach = Array.prototype.forEach;
+const objectKeys = Object.keys;
+const hasOwn = Object.prototype.hasOwnProperty;
+const URLConstructor = URL;
 
 export type Namespace = {
   id: string;
@@ -12,7 +17,7 @@ export type Namespace = {
 }
 
 type RuntimeOptions = {
-  context: Context;
+  context: Record<string, any>;
   eval(cmd: string, file: string): Promise<any>;
 }
 
@@ -40,13 +45,13 @@ export class Runtime {
   }
 
   list() {
-    return [...this.namespaces.keys()].sort();
+    return arraySort.call([...this.namespaces.keys()]);
   }
 
   resolve(id: string, source: string) {
     if (!source.startsWith(".") && !source.startsWith("/")) return source;
     const url = id.startsWith("file://") ? id : `file://${process.cwd()}/`;
-    return new URL(source, url).href; // TODO: show user friendly error
+    return new URLConstructor(source, url).href; // TODO: show user friendly error
   }
 
   /*
@@ -59,7 +64,7 @@ export class Runtime {
     if (!source.startsWith("file://")) {
       throw new Error(`Module must be a local file: ${source}`);
     }
-    await this.eval(await readFile(new URL(source), "utf-8"), id);
+    await this.eval(await readFile(new URLConstructor(source), "utf-8"), id);
   }
 
   private ns(id: string) {
@@ -73,7 +78,7 @@ export class Runtime {
 
   private val(id: string, name: string, source?: string) {
     if (source === undefined) {
-      if (!Object.prototype.hasOwnProperty.call(this.ns(id).scope, name)) {
+      if (!hasOwn.call(this.ns(id).scope, name)) {
         throw new ReferenceError(`${name} is not defined in ${basename(id)}`);
       }
       return this.ns(id).scope[name];
@@ -105,7 +110,7 @@ export class Runtime {
     } else {
       const module = await import(specifier);
       ns.scope = module;
-      Object.keys(module).forEach((name) => {
+      arrayForEach.call(objectKeys(module), (name) => {
         ns.exports[name] = module[name];
       });
       return module;
