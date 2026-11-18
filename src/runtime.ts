@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { inspect } from "node:util";
 import { compile } from "./transform.ts";
 import { modulesSpecifier } from "./module.ts";
-import { basename } from "node:path";
 
 const arraySort = Array.prototype.sort;
 const arrayForEach = Array.prototype.forEach;
@@ -9,35 +12,80 @@ const objectKeys = Object.keys;
 const hasOwn = Object.prototype.hasOwnProperty;
 const URLConstructor = URL;
 
+const inspectOptions = {
+  colors: false,
+  depth: 4,
+  maxArrayLength: 100,
+  breakLength: 100,
+};
+
+const evaluate = Function(
+  "code",
+  "val",
+  "def",
+  "set",
+  "__import",
+  "__importDynamic",
+  "require",
+  "__dirname",
+  "__filename",
+  "module",
+  "exports",
+  "return eval(code)",
+) as (...args: any[]) => any;
+
 export type Namespace = {
   id: string;
   scope: Record<string, any>;
   variables: Record<string, string>;
   exports: Record<string, any>;
-}
+};
 
-type RuntimeOptions = {
-  context: Record<string, any>;
-  eval(cmd: string, file: string): Promise<any>;
-}
+export type RuntimeOptions = {
+  cwd: string;
+};
 
 export class Runtime {
   private readonly options: RuntimeOptions;
   private readonly namespaces = new Map<string, Namespace>();
 
   constructor(options: RuntimeOptions) {
-    options.context.val = this.val.bind(this);
-    options.context.def = this.def.bind(this);
-    options.context.set = this.set.bind(this);
-    options.context.__import = this.import.bind(this);
-    options.context.__importDynamic = this.import.bind(this);
     this.options = options;
   }
 
-  eval(source: string, id = "") {
-    const { code } = compile(source, id, this.ns(id).variables);
+  async eval(source: string, id = "") {
+    const { code } = compile(source, id, this.ns(id).variables, {
+      completion: true,
+    });
     console.debug(`Evaluating code in namespace ${id}:\n${code}`);
-    return this.options.eval(code, id);
+
+    const dir = id.startsWith("file://")
+      ? dirname(fileURLToPath(id))
+      : this.options.cwd;
+    const require = createRequire(pathToFileURL(join(dir, "__esx__.js")));
+    const __dirname = dir;
+    const __filename = join(dir, "__esx__.js");
+    const module = { exports: {} };
+    const exports = module.exports;
+    const args = [
+      this.val.bind(this),
+      this.def.bind(this),
+      this.set.bind(this),
+      this.import.bind(this),
+      this.import.bind(this),
+      require,
+      __dirname,
+      __filename,
+      module,
+      exports,
+    ];
+    const sourceURL = `//# sourceURL=${(id || "esx").replace(/[\r\n\u2028\u2029]/g, " ")}`;
+    const fn = evaluate(
+      `(async function() { ${code}\n})\n${sourceURL}`,
+      ...args,
+    );
+
+    return inspect(await fn.call(globalThis), inspectOptions);
   }
 
   vals(id: string) {

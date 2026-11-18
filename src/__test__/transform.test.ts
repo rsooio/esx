@@ -50,4 +50,11 @@ suite("compile", () => {
     assert.match(output, /var x = 1/);
     assert.match(output, /def\("user", "x", x\)/);
   });
+
+  test("adds a return for the last expression when requested", () => {
+    const output = compile("const x = 1; x", "user", {}, {
+      completion: true,
+    }).code;
+    assert.match(output, /return \(val\("user", "x"\)\)/);
+  });
 });

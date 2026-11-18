@@ -109,9 +109,25 @@ type ScopeInfo = {
 type Scope = Record<string, AnyNode> & { [info]: ScopeInfo };
 type Variables = Record<string, string>;
 
-const DEFAULT_VARIABLES = [...Object.getOwnPropertyNames(globalThis), "require"];
+const DEFAULT_VARIABLES = [
+  ...Object.getOwnPropertyNames(globalThis),
+  "require",
+  "__dirname",
+  "__filename",
+  "module",
+  "exports",
+];
 
-export function compile(source: string, id: string, variables: Variables = {}) {
+export type CompileOptions = {
+  completion?: boolean;
+};
+
+export function compile(
+  source: string,
+  id: string,
+  variables: Variables = {},
+  options: CompileOptions = {},
+) {
   source = stripTypeScriptTypes(source);
 
   const ast = parser.parse(source, {
@@ -326,6 +342,17 @@ export function compile(source: string, id: string, variables: Variables = {}) {
 
   const scope = create("global");
   walk(ast, scope, [], true);
+
+  if (options.completion) {
+    for (let i = ast.body.length - 1; i >= 0; i--) {
+      const node = ast.body[i];
+      if (node.type === "EmptyStatement") continue;
+      if (node.type === "ExpressionStatement") {
+        edits.push({ start: node.start, end: node.start, text: "return " });
+      }
+      break;
+    }
+  }
 
   edits.sort((a, b) => b.start - a.start);
   edits.forEach(({ start, end, text }) => {

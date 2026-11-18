@@ -67,6 +67,26 @@ suite("realm", () => {
     }
   });
 
+  test("supports top-level await with imports and for await", async () => {
+    const { realm } = await makeRealm();
+    try {
+      assert.equal(
+        await realm.eval(
+          'import { readFile } from "node:fs/promises"; await Promise.resolve(1); typeof readFile',
+        ),
+        "'function'",
+      );
+      assert.equal(
+        await realm.eval(
+          "const out = []; for await (const x of [Promise.resolve(1)]) out.push(x); out",
+        ),
+        "[ 1 ]",
+      );
+    } finally {
+      await realm.stop();
+    }
+  });
+
   test("supports destructuring and imports", async () => {
     const { realm } = await makeRealm();
     try {
@@ -128,6 +148,43 @@ suite("realm", () => {
       );
       assert.equal(await realm.eval("typeof setTimeout"), "'function'");
       assert.equal(await realm.eval("typeof Buffer"), "'function'");
+    } finally {
+      await realm.stop();
+    }
+  });
+
+  test("keeps the runtime in the eval scope", async () => {
+    const { realm } = await makeRealm();
+    try {
+      assert.equal(await realm.eval("typeof globalThis.val"), "'undefined'");
+      assert.equal(await realm.eval("typeof globalThis.require"), "'undefined'");
+      assert.equal(await realm.eval("typeof require"), "'function'");
+      assert.equal(await realm.eval("typeof module"), "'object'");
+      assert.equal(await realm.eval("typeof exports"), "'object'");
+      assert.equal(await realm.eval("typeof __dirname"), "'string'");
+      assert.equal(await realm.eval("typeof __filename"), "'string'");
+      assert.equal(await realm.eval("module.exports = 1; module.exports"), "1");
+      assert.equal(await realm.eval("exports.a = 2; exports.a"), "2");
+      assert.equal(await realm.eval("this === globalThis"), "true");
+      assert.equal(
+        await realm.eval("function f() { return this === globalThis }; f()"),
+        "true",
+      );
+      assert.equal(await realm.eval("var scoped = 1; 2"), "2");
+      assert.equal(await realm.eval("typeof globalThis.scoped"), "'undefined'");
+    } finally {
+      await realm.stop();
+    }
+  });
+
+  test("isolates namespace declarations", async () => {
+    const { realm } = await makeRealm();
+    try {
+      assert.equal(await realm.eval("var shared = 1", "a"), "undefined");
+      assert.equal(await realm.eval("var shared = 2", "b"), "undefined");
+      assert.equal(await realm.eval("shared", "a"), "1");
+      assert.equal(await realm.eval("shared", "b"), "2");
+      assert.equal(await realm.eval("typeof globalThis.shared"), "'undefined'");
     } finally {
       await realm.stop();
     }

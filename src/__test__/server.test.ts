@@ -302,7 +302,7 @@ suite("server", () => {
 
         result = await server.request("eval", {
           ns,
-          code: 'import { boom } from "foo"; try { boom() } catch (error) { error instanceof Error }',
+          code: 'import { boom } from "foo"; let ok; try { boom() } catch (error) { ok = error instanceof Error }; ok',
         });
         assert.equal(result.message.value, "true");
 

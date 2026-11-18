@@ -1,6 +1,5 @@
 import { pathToFileURL } from "node:url";
 import { format } from "node:util";
-import { Evaluator } from "./evaluator.ts";
 import { Runtime } from "./runtime.ts";
 
 if (!process.env.DEBUG) {
@@ -19,11 +18,7 @@ process.exit = ((code?: number) => {
   throw new Error(`process.exit(${code ?? 0}) is not available in the REPL`);
 }) as typeof process.exit;
 
-const evaluator = await Evaluator.create({ cwd: process.cwd() });
-const runtime = new Runtime({
-  context: evaluator.context,
-  eval: (code, file) => evaluator.evaluate(code, file),
-});
+const runtime = new Runtime({ cwd: process.cwd() });
 
 function errorInfo(error: any) {
   return {
