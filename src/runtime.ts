@@ -172,3 +172,106 @@ export class Runtime {
     return specifier;
   }
 }
+
+type Module = {
+  scope?: Record<string, any>;
+  exports?: Record<string, any>;
+  variableMap?: Record<string, string>; // move to compiler
+}
+
+type Runtime2Options = {
+  // global variables to be injected into the runtime environment
+  global?: Record<string, any>;
+
+  // import a module by file and source, return the module's scope and exports
+  import?(id: string, source: string): Promise<Module | undefined>;
+
+  // load a module by file and source, return the module's code as string
+  load?(id: string, source: string): Promise<string>;
+}
+
+export class Runtime2 {
+  private readonly options: Runtime2Options;
+  private readonly evaluate: (...args: any[]) => any;
+  private readonly args: Record<string, any> = {};
+  private readonly modules = new Map<string, Module>();
+
+  constructor(options: Runtime2Options) {
+    this.options = options;
+    this.args = {
+      ...options.global,
+      __import: this.import.bind(this),
+      val: this.val.bind(this),
+      def: this.def.bind(this),
+      set: this.def.bind(this), // remove this, use def instead
+    }
+    this.evaluate = Function(
+      ...objectKeys(this.args),
+      "return eval(code)",
+    ) as (...args: any[]) => any;
+  }
+
+  eval(source: string, file: string) {
+    const { code } = compile(source, file, {}, { completion: true });
+    console.debug(`Evaluating code in file ${file}:\n${code}`);
+
+    const sourceURL = `//# sourceURL=${(file).replace(/[\r\n\u2028\u2029]/g, " ")}`;
+    const result = this.evaluate(
+      `({ value: (async function() { ${code}\n}) })\n${sourceURL}`,
+      ...Object.values(this.args),
+    );
+    return result.value;
+  }
+
+  private async import(id: string, source: string) {
+    const module = await this.module(id, source);
+    if (module) return module.exports ?? {};
+    const specifier = this.resolve(id, source);
+    if (specifier.startsWith("file://")) {
+      if (!this.options.load) return;
+      const module: Module = {};
+      this.modules.set(specifier, module);
+      await this.eval(await this.options.load(id, specifier), specifier);
+      return module.exports ?? {};
+    } else {
+      const module = await import(specifier);
+      this.modules.set(specifier, { scope: module, exports: module });
+      return module;
+    }
+  }
+
+  private async module(id: string, source: string) {
+    const specifier = this.resolve(id, source);
+    if (this.modules.has(specifier)) return this.modules.get(specifier);
+    const module = await this.options.import?.(source, id);
+    if (!module) return;
+    this.modules.set(specifier, module);
+    return module;
+  }
+
+  private resolve(id: string, source: string) {
+    if (!source.startsWith(".") && !source.startsWith("/")) return source;
+    const url = id.startsWith("file://") ? id : `file://${process.cwd()}/`;
+    return new URLConstructor(source, url).href; // TODO: show user friendly error
+  }
+
+  private val(id: string, name: string, source?: string) {
+    const module = this.modules.get(source ? this.resolve(id, source) : id);
+    if (!module?.scope || !Object.hasOwn(module.scope, name)) {
+      throw new ReferenceError(`${name} is not defined in ${basename(id)}`);
+    }
+    return name === "*" ? module.scope : module.scope[name];
+  }
+
+  private def(id: string, name: string, value: any, exports = false) {
+    const module = this.modules.get(id) ?? {};
+    if (!this.modules.has(id)) this.modules.set(id, module);
+    module.scope ??= {};
+    module.scope[name] = value;
+    if (exports) {
+      module.exports ??= {};
+      module.exports[name] = value;
+    }
+    return value;
+  }
+}
