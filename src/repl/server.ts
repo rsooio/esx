@@ -1,5 +1,5 @@
 import { format } from "node:util";
-import { Realm } from "./realm.ts";
+import { Realm } from "../realm.ts";
 
 type Request = {
   id?: string | number;
