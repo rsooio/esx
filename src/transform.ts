@@ -1,5 +1,5 @@
 import { Parser } from "acorn";
-import type { AnyNode, Identifier, Literal, Pattern } from "acorn";
+import type { AnyNode, Expression, Identifier, Literal, Pattern } from "acorn";
 import { base } from "acorn-walk";
 import { stripTypeScriptTypes } from "node:module";
 
@@ -99,14 +99,8 @@ export const parser = Parser.extend((BaseParser) => class extends BaseParser {
   }
 });
 
-const info = Symbol("info");
-
-type ScopeInfo = {
-  children: Scope[];
-  type: "block" | "function" | "global";
-};
-
-type Scope = Record<string, AnyNode> & { [info]: ScopeInfo };
+const root = Symbol("root");
+type Scope = Record<string, AnyNode> & { [root]?: Scope };
 type Variables = Record<string, string>;
 
 const DEFAULT_VARIABLES = [
@@ -137,12 +131,12 @@ export function compile(
   });
 
   function val(name: string, node?: { start: number; end: number }) {
-    if (node === undefined) return `(val(${JSON.stringify(id)}, ${JSON.stringify(name)}))`;
-    return `(val(${JSON.stringify(id)}, ${JSON.stringify(name)}, ${source.slice(node.start, node.end)}))`;
+    if (node === undefined) return `val("${id}", "${name}")`;
+    return `val("${id}", "${name}", ${source.slice(node.start, node.end)})`;
   }
 
-  function def(name: string) {
-    return `def(${JSON.stringify(id)}, ${JSON.stringify(name)}, ${name})`;
+  function def(pattern: string, node?: string, scope?: Scope) {
+    return ""
   }
 
   const edits: { start: number; end: number; text: string }[] = [];
@@ -151,62 +145,49 @@ export function compile(
     edits.push({ start: node.start, end: node.end ?? node.start, text });
   }
 
-  function assign(scope: Scope, pattern: Pattern | Pattern[], hoist = false) {
-    if (hoist && scope[info].type === "block") {
-      return assign(Object.getPrototypeOf(scope), pattern, hoist);
-    }
-    return Object.assign(scope, Object.fromEntries(collectNames(pattern)));
+  function slice(node: { start: number; end?: number }) {
+    return source.slice(node.start, node.end ?? node.start);
   }
 
-  function findScope(scope: Scope, name: string): Scope | undefined {
-    for (let current: Scope | null = scope; current; current = Object.getPrototypeOf(current)) {
-      if (Object.prototype.hasOwnProperty.call(current, name)) return current;
-    }
-    return undefined;
-  }
-
-  function joinDefs(names: string[], end: number) {
-    const separator = source[end - 1] === ";" ? "" : ";";
-    return names
-      .map((name, index) => `${index === 0 ? separator : ";"}${def(name)}`)
-      .join("") + ";";
-  }
-
-  function create(type: ScopeInfo["type"], parent?: Scope): Scope {
+  function create(parent?: Scope, type?: "function"): Scope {
     const scope: Scope = Object.create(parent || null);
-    scope[info] = { type, children: [] };
-    if (parent) parent[info].children.push(scope);
+    if (type === "function") scope[root] = scope;
+    // if (parent) parent[children].children.push(scope);
     return scope;
   }
 
-  function walk(
-    node: AnyNode,
-    scope: Scope,
-    ancestors: AnyNode[] = [],
-    topLevel = false,
-  ) {
+  function assign(scope: Scope, pattern: Pattern | Pattern[]) {
+    return Object.assign(scope, Object.fromEntries(collectNames(pattern)));
+  }
+
+  function exists(scope: Scope = {}, name: string) {
+    return name in variables || name in DEFAULT_VARIABLES || name in scope;
+  }
+
+  (function walk(node: AnyNode, scope?: Scope, ancestors: AnyNode[] = []) {
     switch (node.type) {
       case "FunctionDeclaration":
-        if (node.id) {
+        if (!scope) {
+          if (!node.id) break; // skipped default export function declaration
+          def(node.id.name, slice(node));
+        } else if (node.id) {
           scope[node.id.name] = node;
-          if (topLevel) replace({ start: node.end }, `;${def(node.id.name)};`);
         }
       case "FunctionExpression":
       case "ArrowFunctionExpression":
-        scope = assign(create("function", scope), node.params);
+        scope = assign(create(scope, "function"), node.params);
         node = node.body;
         break;
       case "ClassDeclaration":
-        if (node.id) {
+        if (!scope) {
+          if (!node.id) break; // skipped default export class declaration
+          def(node.id.name, slice(node));
+        } else if (node.id) {
           scope[node.id.name] = node;
-          if (topLevel) {
-            replace({ start: node.start }, `var ${node.id.name} = `);
-            replace({ start: node.end }, `;${def(node.id.name)};`);
-          }
         }
-        node = node.body;
-        break;
       case "ClassExpression":
+        scope = create(scope);
+        scope["this"] = node;
         node = node.body;
         break;
       case "SwitchStatement":
@@ -214,144 +195,71 @@ export function compile(
       case "ForStatement":
       case "ForInStatement":
       case "ForOfStatement":
-        scope = create("block", scope);
+        scope = create(scope);
         break;
       case "CatchClause":
-        scope = assign(create("block", scope), node.param ? [node.param] : []);
+        scope = assign(create(scope), node.param ? [node.param] : []);
         node = node.body;
         break;
       case "AssignmentExpression":
-        if (node.left.type === "Identifier") {
-          const owner = findScope(scope, node.left.name);
-          if (owner && owner[info].type !== "global") break;
-          const name = node.left.name;
-          if (node.operator === "=") {
-            replace(
-              { start: node.start, end: node.right.start },
-              `set(${JSON.stringify(id)}, ${JSON.stringify(name)}, `,
-            );
-          } else {
-            const operator = node.operator.slice(0, -1);
-            replace(
-              { start: node.start, end: node.right.start },
-              `set(${JSON.stringify(id)}, ${JSON.stringify(name)}, ${val(name)} ${operator} `,
-            );
-          }
-          replace({ start: node.end }, ");");
-          walk(node.right, scope, [node, ...ancestors], false);
-          return;
-        }
+        // ({ /* scope pattern */ } = def("{ unscoped pattern }", expression));
+        throw new Error("AssignmentExpression is not supported yet");
         break;
       case "UpdateExpression":
         if (node.argument.type === "Identifier") {
-          const owner = findScope(scope, node.argument.name);
-          if (owner && owner[info].type !== "global") break;
-          const name = node.argument.name;
-          const operator = node.operator === "++" ? "+" : "-";
-          replace(
-            node,
-            `set(${JSON.stringify(id)}, ${JSON.stringify(name)}, ${val(name)} ${operator} 1)`,
-          );
-          return;
+          const { argument: { name }, operator } = node;
+          if (exists(scope, name)) break;
+          replace(node, def(name, `${val(name)}${operator[0]}1`, scope));
+          return; // Is this correct? Should we return here to avoid further walking?
         }
         break;
-      case "VariableDeclaration": {
-        const patterns = node.declarations.map((decl) => decl.id);
-        scope = assign(scope, patterns, node.kind === "var");
-        if (topLevel) {
-          if (node.kind !== "var") {
-            replace(
-              { start: node.start, end: node.start + node.kind.length },
-              "var",
-            );
-          }
-          const names = patterns.flatMap(collectNames).map(([name]) => name);
-          if (names.length) {
-            replace({ start: node.end }, joinDefs(names, node.end));
-          }
+      case "VariableDeclaration":
+        // toplevel or hoisted to toplevel
+        if (!scope || node.kind === "var" && scope[root]) {
+          replace(node, "");
+          node.declarations.toReversed().forEach(({ id, init }) => {
+            const expression = init ? slice(init) : undefined;
+            replace({ start: node.start }, def(slice(id), expression));
+          });
+        } else {
+          assign(scope, node.declarations.map(({ id }) => id));
         }
         break;
-      }
       case "Identifier":
         if (!isVariableReference(node, ancestors)) break;
         if (node.name in variables) {
           replace(node, variables[node.name]);
           break;
         }
-        {
-          const owner = findScope(scope, node.name);
-          if (owner) {
-            if (owner[info].type === "global") replace(node, val(node.name));
-            break;
-          }
-        }
-        if (DEFAULT_VARIABLES.includes(node.name)) break;
+        if (exists(scope, node.name)) break;
         replace(node, val(node.name));
         break;
       case "ImportDeclaration": {
         const { source } = node;
-        replace(
-          node,
-          `await __import(${JSON.stringify(id)}, ${JSON.stringify(source.value)});`,
-        );
+        replace(node, `await __import("${id}", "${source.value}")`);
         node.specifiers.forEach((specifier) => {
+          const name = specifier.local.name;
           if (specifier.type === "ImportSpecifier") {
-            variables[specifier.local.name] = val(nameof(specifier.imported), source);
+            variables[name] = val(nameof(specifier.imported), source);
           } else if (specifier.type === "ImportDefaultSpecifier") {
-            variables[specifier.local.name] = val("default", source);
+            variables[name] = val("default", source);
           } else if (specifier.type === "ImportNamespaceSpecifier") {
-            variables[specifier.local.name] = val("*", source);
+            variables[name] = val("*", source);
           }
         });
         break;
       }
-      case "ImportExpression": {
-        replace(
-          { start: node.start, end: node.source.start },
-          `__importDynamic(${JSON.stringify(id)}, `,
-        );
-        walk(node.source, scope, [node, ...ancestors], false);
-        return;
-      }
-      case "ExportNamedDeclaration":
-        if (node.declaration) {
-          replace({ start: node.start, end: node.declaration.start });
-          walk(node.declaration, scope, [node, ...ancestors], topLevel);
-        } else {
-          replace(node, ";");
-        }
-        return;
-      case "ExportDefaultDeclaration":
-        if (
-          node.declaration.type !== "FunctionDeclaration" &&
-          node.declaration.type !== "ClassDeclaration"
-        ) {
-          replace(
-            { start: node.start, end: node.declaration.start },
-            `def(${JSON.stringify(id)}, "default", `,
-          );
-          replace({ start: node.end }, ");");
-          walk(node.declaration, scope, [node, ...ancestors], false);
-        }
+      case "ImportExpression":
+        replace({ start: node.start }, "__");
         return;
     }
     // @ts-expect-error base is a recursive walker
-    base[node.type](node, null, (n) =>
-      walk(n, scope, [node, ...ancestors], topLevel && node.type === "Program"));
-  }
-
-  const scope = create("global");
-  walk(ast, scope, [], true);
+    base[node.type](node, null, (n) => walk(n, scope, [node, ...ancestors]));
+  })(ast);
 
   if (options.completion) {
-    for (let i = ast.body.length - 1; i >= 0; i--) {
-      const node = ast.body[i];
-      if (node.type === "EmptyStatement") continue;
-      if (node.type === "ExpressionStatement") {
-        edits.push({ start: node.start, end: node.start, text: "return " });
-      }
-      break;
-    }
+    const node = ast.body.findLast(({ type }) => type === "ExpressionStatement");
+    if (node) replace({ start: node.start }, "return ");
   }
 
   edits.sort((a, b) => b.start - a.start);
@@ -359,5 +267,5 @@ export function compile(
     source = source.slice(0, start) + text + source.slice(end);
   });
 
-  return { scope, code: source };
+  return source;
 }
