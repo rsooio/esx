@@ -1,5 +1,5 @@
 import { Parser } from "acorn";
-import type { AnyNode, Expression, Identifier, Literal, Pattern } from "acorn";
+import type { AnyNode, Identifier, Literal, Pattern } from "acorn";
 import { base } from "acorn-walk";
 import { stripTypeScriptTypes } from "node:module";
 
@@ -103,22 +103,13 @@ const root = Symbol("root");
 type Scope = Record<string, AnyNode> & { [root]?: Scope };
 type Variables = Record<string, string>;
 
-const DEFAULT_VARIABLES = [
-  ...Object.getOwnPropertyNames(globalThis),
-  "require",
-  "__dirname",
-  "__filename",
-  "module",
-  "exports",
-];
-
 export type CompileOptions = {
   completion?: boolean;
 };
 
 export function compile(
   source: string,
-  id: string,
+  file: string,
   variables: Variables = {},
   options: CompileOptions = {},
 ) {
@@ -130,13 +121,13 @@ export function compile(
     allowAwaitOutsideFunction: true,
   });
 
-  function val(name: string, node?: { start: number; end: number }) {
-    if (node === undefined) return `val("${id}", "${name}")`;
-    return `val("${id}", "${name}", ${source.slice(node.start, node.end)})`;
+  function val(name: string, source = "undefined") {
+    if (variables[name]) return variables[name];
+    return `val("${file}", "${name}", ${source}).value`;
   }
 
-  function def(pattern: string, node?: string, scope?: Scope) {
-    return ""
+  function def(name: string, expression: string, exported = false) {
+    return `def("${file}", "${name}", ${exported}).value = ${expression};`;
   }
 
   const edits: { start: number; end: number; text: string }[] = [];
@@ -152,7 +143,6 @@ export function compile(
   function create(parent?: Scope, type?: "function"): Scope {
     const scope: Scope = Object.create(parent || null);
     if (type === "function") scope[root] = scope;
-    // if (parent) parent[children].children.push(scope);
     return scope;
   }
 
@@ -160,16 +150,11 @@ export function compile(
     return Object.assign(scope, Object.fromEntries(collectNames(pattern)));
   }
 
-  function exists(scope: Scope = {}, name: string) {
-    return name in variables || name in DEFAULT_VARIABLES || name in scope;
-  }
-
   (function walk(node: AnyNode, scope?: Scope, ancestors: AnyNode[] = []) {
     switch (node.type) {
       case "FunctionDeclaration":
         if (!scope) {
-          if (!node.id) break; // skipped default export function declaration
-          def(node.id.name, slice(node));
+          replace(node, def(node.id?.name ?? "default", slice(node)));
         } else if (node.id) {
           scope[node.id.name] = node;
         }
@@ -180,8 +165,7 @@ export function compile(
         break;
       case "ClassDeclaration":
         if (!scope) {
-          if (!node.id) break; // skipped default export class declaration
-          def(node.id.name, slice(node));
+          replace(node, def(node.id?.name ?? "default", slice(node)));
         } else if (node.id) {
           scope[node.id.name] = node;
         }
@@ -201,56 +185,36 @@ export function compile(
         scope = assign(create(scope), node.param ? [node.param] : []);
         node = node.body;
         break;
-      case "AssignmentExpression":
-        // ({ /* scope pattern */ } = def("{ unscoped pattern }", expression));
-        throw new Error("AssignmentExpression is not supported yet");
-        break;
-      case "UpdateExpression":
-        if (node.argument.type === "Identifier") {
-          const { argument: { name }, operator } = node;
-          if (exists(scope, name)) break;
-          replace(node, def(name, `${val(name)}${operator[0]}1`, scope));
-          return; // Is this correct? Should we return here to avoid further walking?
-        }
-        break;
       case "VariableDeclaration":
         // toplevel or hoisted to toplevel
         if (!scope || node.kind === "var" && scope[root]) {
           replace(node, "");
           node.declarations.toReversed().forEach(({ id, init }) => {
-            const expression = init ? slice(init) : undefined;
-            replace({ start: node.start }, def(slice(id), expression));
+            if (!init) return;
+            replace({ start: node.start }, def(slice(id), slice(init)));
           });
         } else {
           assign(scope, node.declarations.map(({ id }) => id));
         }
         break;
       case "Identifier":
-        if (!isVariableReference(node, ancestors)) break;
-        if (node.name in variables) {
-          replace(node, variables[node.name]);
-          break;
+        if (isVariableReference(node, ancestors) && !scope?.[node.name]) {
+          replace(node, val(node.name));
         }
-        if (exists(scope, node.name)) break;
-        replace(node, val(node.name));
         break;
-      case "ImportDeclaration": {
-        const { source } = node;
-        replace(node, `await __import("${id}", "${source.value}")`);
-        node.specifiers.forEach((specifier) => {
-          const name = specifier.local.name;
-          if (specifier.type === "ImportSpecifier") {
-            variables[name] = val(nameof(specifier.imported), source);
-          } else if (specifier.type === "ImportDefaultSpecifier") {
-            variables[name] = val("default", source);
-          } else if (specifier.type === "ImportNamespaceSpecifier") {
-            variables[name] = val("*", source);
-          }
-        });
+      case "ImportDeclaration": // TODO: handle attributes
+        replace(node, `await __import("${file}", ${slice(node.source)})`);
+        for (const specifier of node.specifiers) {
+          const name = (() => {
+            if (specifier.type === "ImportDefaultSpecifier") return "default";
+            if (specifier.type === "ImportNamespaceSpecifier") return "*";
+            return nameof(specifier.imported);
+          })();
+          variables[specifier.local.name] = val(name, slice(node.source));
+        }
         break;
-      }
-      case "ImportExpression":
-        replace({ start: node.start }, "__");
+      case "ImportExpression": // TODO: handle options
+        replace(node, `await __import("${file}", ${slice(node.source)})`);
         return;
     }
     // @ts-expect-error base is a recursive walker
@@ -268,4 +232,19 @@ export function compile(
   });
 
   return source;
+}
+
+export class Transpiler {
+  private readonly global: Variables;
+  private readonly variables = new Map<string, Variables>();
+
+  constructor(global: string[] = []) {
+    this.global = Object.fromEntries(global.map((name) => [name, name]));
+  }
+
+  transpile(source: string, file: string, completion = false) {
+    const variables = this.variables.get(file) ?? { ...this.global };
+    if (!this.variables.has(file)) this.variables.set(file, variables);
+    return compile(source, file, variables, { completion });
+  }
 }

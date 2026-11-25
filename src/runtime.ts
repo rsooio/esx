@@ -1,19 +1,21 @@
 import { basename } from "node:path";
-import { compile } from "./transform.ts";
 import Arborist from "@npmcli/arborist";
+import { Transpiler } from "./transform.ts";
+import assert from "node:assert/strict";
 
-type Module = {
-  scope?: Record<string, any>;
-  exports?: Record<string, any>;
-  variableMap?: Record<string, string>; // move to compiler
-}
+type Value<T = any> = {
+  value: T;
+  exported?: boolean;
+};
 
-type RuntimeOptions = {
+type Module = Record<string, Value>;
+
+export type RuntimeOptions = {
   // global variables to be injected into the runtime environment
   global?: Record<string, any>;
 
   // import a module, return the module's scope and exports
-  import?(specifier: string, parent: string): Promise<Module | undefined>;
+  import?(specifier: string, parent: string): Promise<Record<string, any> | undefined>;
 
   // load a module, return the module's code as string
   load?(specifier: string, parent?: string): Promise<string>;
@@ -23,6 +25,7 @@ type RuntimeOptions = {
 }
 
 export class Runtime {
+  private readonly transpiler = new Transpiler();
   private readonly options: RuntimeOptions;
   private readonly evaluate: (...args: any[]) => any;
   private readonly args: Record<string, any> = {};
@@ -50,7 +53,7 @@ export class Runtime {
   }
 
   eval(source: string, file: string) {
-    const { code } = compile(source, file, {}, { completion: true });
+    const code = this.transpiler.transpile(source, file, true);
     console.debug(`Evaluating code in file ${file}:\n${code}`);
 
     const sourceURL = `//# sourceURL=${(file).replace(/[\r\n\u2028\u2029]/g, " ")}`;
@@ -67,50 +70,78 @@ export class Runtime {
    * @param specifier The module specifier, can be a file URL or a package name.
    * @param parent The parent module specifier, used for resolving relative paths.
    */
-  private async import(specifier: string, parent?: string) {
+  private async import(specifier: string, parent: string) {
     if (this.modules.has(specifier)) return;
-    const url = this.resolve(specifier, parent);
+    const url = await this.resolve(specifier, parent, true);
     if (url.startsWith("file://") && !url.includes("node_modules")) {
       if (!this.options.load) return;
-      this.modules.set(url, { scope: {}, exports: {} });
+      this.modules.set(url, {});
       await this.eval(await this.options.load(url, parent), url);
     } else {
-      const module = await import(url);
-      this.modules.set(url, { scope: module, exports: module });
+      const module = await import(url)
+      const values: Module = {};
+      for (const name in module) {
+        values[name] = { value: values[name], exported: true };
+      }
+      this.modules.set(url, values);
     }
   }
 
-  private resolve(specifier: string, parent?: string) {
+  private resolve(specifier: string, parent: string, async?: false): string
+  private resolve(specifier: string, parent: string, async: true): Promise<string>
+  private resolve(specifier: string, parent: string, async = false) {
     if (this.arborist && specifier.startsWith("npm:")) {
-      const [pkg, ...rest] = specifier.slice(4).split("/");
-      const [name, version] = pkg.split("@");
-      const nodes = this.arborist.actualTree?.inventory.query(name, version);
-      if (!nodes || nodes.size === 0) {
-        throw new Error(`Package ${name}@${version} not found in node_modules`);
-      }
-      console.log(nodes);
-      return [nodes.values().toArray()[0].path, ...rest].join("/");
+      const resolved = this.resolveNpm(specifier);
+      if (resolved) return resolved;
+      if (async) return this.install(specifier);
+      throw new Error(`Cannot resolve ${specifier}`);
     }
     return import.meta.resolve(specifier, parent);
   }
 
-  private val(id: string, name: string, source?: string) {
-    const module = this.modules.get(source ? this.resolve(id, source) : id);
-    if (!module?.scope || !Object.hasOwn(module.scope, name)) {
-      throw new ReferenceError(`${name} is not defined in ${basename(id)}`);
-    }
-    return name === "*" ? module.scope : module.scope[name];
+  private async install(specifier: string) {
+    assert(this.arborist, "NPM support is not enabled");
+    assert(specifier.startsWith("npm:"), "Specifier must start with 'npm:'");
+    await this.arborist.loadActual();
+    let resolved = this.resolveNpm(specifier);
+    if (resolved) return resolved; // try to resolve again
+    const pkg = specifier.slice(4, specifier.indexOf("/"));
+    await this.arborist.reify({ add: [pkg] });
+    resolved = this.resolveNpm(specifier);
+    assert(resolved, `Failed to install ${specifier}`);
+    return resolved;
   }
 
-  private def(id: string, name: string, value: any, exports = false) {
+  private resolveNpm(specifier: string) {
+    assert(this.arborist, "NPM support is not enabled");
+    assert(specifier.startsWith("npm:"), "Specifier must start with 'npm:'");
+
+    const [pkg, ...rest] = specifier.slice(4).split("/");
+    const [name, version] = pkg.split("@");
+    if (!this.arborist.actualTree) return;
+    const nodes = [...this.arborist.actualTree?.inventory.query("name", name)];
+    const node = nodes.find((node) => node.version === version);
+    if (!node) return;
+    // TODO: use package config to resolve instead of just returning the path
+    return [nodes.values().toArray()[0].path, ...rest].join("/");
+  }
+
+  private val(id: string, name: string, source?: string) {
+    const module = this.modules.get(source ? this.resolve(id, source) : id);
+    if (!module) {
+      throw new ReferenceError(`Module ${source ?? id} is not loaded`);
+    } else if (source && module[name] && !module[name].exported) {
+      throw new ReferenceError(`${name} is not exported from ${basename(id)}`);
+    } else if (!module[name]) {
+      throw new ReferenceError(`${name} is not defined in ${basename(id)}`);
+    }
+    return name === "*" ? { value: module } : module[name];
+  }
+
+  private def(id: string, name: string, exported = false) {
     const module = this.modules.get(id) ?? {};
     if (!this.modules.has(id)) this.modules.set(id, module);
-    module.scope ??= {};
-    module.scope[name] = value;
-    if (exports) {
-      module.exports ??= {};
-      module.exports[name] = value;
-    }
-    return value;
+    module[name] = { exported, value: undefined };
+    return module[name];
   }
 }
