@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import Arborist from "@npmcli/arborist";
 import { Transpiler } from "./transform.ts";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 type Value<T = any> = {
   value: T;
@@ -18,7 +19,7 @@ export type RuntimeOptions = {
   import?(specifier: string, parent: string): Promise<Record<string, any> | undefined>;
 
   // load a module, return the module's code as string
-  load?(specifier: string, parent?: string): Promise<string>;
+  load?(url: string): Promise<string>;
 
   // support for importing npm packages, for example: "npm:lodash@4.17.21"
   npm?: string | Arborist.Options
@@ -32,9 +33,10 @@ export class Runtime {
   private readonly modules = new Map<string, Module>();
   private readonly arborist: Arborist | null = null;
 
-  constructor(options: RuntimeOptions) {
+  constructor(options: RuntimeOptions = {}) {
     if (options.npm) {
       if (typeof options.npm === "string") options.npm = { path: options.npm };
+      options.npm.savePrefix = ""; // match exact version, not ^ or ~
       this.arborist = new Arborist(options.npm);
       this.arborist.loadActual(); // TODO: handle errors and async
     }
@@ -44,24 +46,50 @@ export class Runtime {
       __import: this.import.bind(this),
       val: this.val.bind(this),
       def: this.def.bind(this),
-      set: this.def.bind(this), // remove this, use def instead
     }
     this.evaluate = Function(
       ...Object.keys(this.args),
+      "code",
       "return eval(code)",
     ) as (...args: any[]) => any;
   }
 
   eval(source: string, file: string) {
     const code = this.transpiler.transpile(source, file, true);
-    console.debug(`Evaluating code in file ${file}:\n${code}`);
 
     const sourceURL = `//# sourceURL=${(file).replace(/[\r\n\u2028\u2029]/g, " ")}`;
-    const result = this.evaluate(
-      `(async function() { ${code}\n})\n${sourceURL}`,
-      ...Object.values(this.args),
-    );
-    return result.value;
+    const runtimeCode = `(async function() {\n${code}})\n${sourceURL}`;
+    console.debug(`Evaluating code in file ${file}:\n${runtimeCode}`);
+    const result = this.evaluate(...Object.values(this.args), runtimeCode);
+    return result.call(globalThis);
+  }
+
+  vals(specifier: string) {
+    return this.modules.get(specifier) ?? {};
+  }
+
+  list() {
+    return [...this.modules.keys()];
+  }
+
+  resolve(specifier: string, parent: string, async?: false): string
+  resolve(specifier: string, parent: string, async: true): Promise<string>
+  resolve(specifier: string, parent: string, async = false) {
+    if (specifier.startsWith("esx:")) return specifier.slice(4);
+    if (specifier.startsWith("npm:")) {
+      if (!this.arborist) throw new Error("NPM support is not enabled");
+      const resolved = this.resolveNpm(specifier);
+      if (resolved) return resolved;
+      if (async) return this.install(specifier);
+      throw new Error(`Cannot resolve ${specifier}`);
+    }
+    return import.meta.resolve(specifier, parent);
+  }
+
+  async load(specifier: string, file: string) {
+    if (!this.modules.has(specifier)) this.modules.set(specifier, {});
+    const code = await (this.options.load?.(file) ?? readFile(file, "utf8"));
+    return this.eval(code, specifier);
   }
 
   /*
@@ -70,13 +98,11 @@ export class Runtime {
    * @param specifier The module specifier, can be a file URL or a package name.
    * @param parent The parent module specifier, used for resolving relative paths.
    */
-  private async import(specifier: string, parent: string) {
+  private async import(parent: string, specifier: string) {
     if (this.modules.has(specifier)) return;
     const url = await this.resolve(specifier, parent, true);
     if (url.startsWith("file://") && !url.includes("node_modules")) {
-      if (!this.options.load) return;
-      this.modules.set(url, {});
-      await this.eval(await this.options.load(url, parent), url);
+      await this.load(specifier, url);
     } else {
       const module = await import(url)
       const values: Module = {};
@@ -85,18 +111,6 @@ export class Runtime {
       }
       this.modules.set(url, values);
     }
-  }
-
-  private resolve(specifier: string, parent: string, async?: false): string
-  private resolve(specifier: string, parent: string, async: true): Promise<string>
-  private resolve(specifier: string, parent: string, async = false) {
-    if (this.arborist && specifier.startsWith("npm:")) {
-      const resolved = this.resolveNpm(specifier);
-      if (resolved) return resolved;
-      if (async) return this.install(specifier);
-      throw new Error(`Cannot resolve ${specifier}`);
-    }
-    return import.meta.resolve(specifier, parent);
   }
 
   private async install(specifier: string) {
@@ -128,14 +142,19 @@ export class Runtime {
 
   private val(id: string, name: string, source?: string) {
     const module = this.modules.get(source ? this.resolve(id, source) : id);
-    if (!module) {
-      throw new ReferenceError(`Module ${source ?? id} is not loaded`);
-    } else if (source && module[name] && !module[name].exported) {
-      throw new ReferenceError(`${name} is not exported from ${basename(id)}`);
-    } else if (!module[name]) {
-      throw new ReferenceError(`${name} is not defined in ${basename(id)}`);
+    if (module?.[name]) {
+      if (source && !module[name].exported) {
+        throw new ReferenceError(`${name} is not exported from ${basename(id)}`);
+      }
+      return name === "*" ? { value: module } : module[name];
     }
-    return name === "*" ? { value: module } : module[name];
+    const value = (globalThis as any)[name];
+    if (value) return { value };
+    if (source) {
+      throw new ReferenceError(`Module ${source} is not loaded`);
+    } else {
+      throw new ReferenceError(`${name} is not defined`);
+    }
   }
 
   private def(id: string, name: string, exported = false) {
