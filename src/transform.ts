@@ -32,7 +32,7 @@ function isPatternBinding(ancestors: AnyNode[]) {
 export function isVariableReference(node: Identifier, ancestors: AnyNode[]) {
   const [parent] = ancestors;
   switch (parent?.type) {
-    case "MemberExpression":
+    case "MemberExpression": // (...).node or node[...]
       return parent.object === node || parent.computed;
     case "Property":
       if (parent.key === node) return parent.computed;
@@ -99,8 +99,12 @@ export const parser = Parser.extend((BaseParser) => class extends BaseParser {
   }
 });
 
-const root = Symbol("root");
-type Scope = Record<string, AnyNode> & { [root]?: Scope };
+const INFO = Symbol("INFO");
+type ScopeType = "global" | "module" | "function" | "block";
+type Scope = {
+  [INFO]: { type: ScopeType; top: Scope; id: string };
+  [name: string]: any;
+};
 type Variables = Record<string, string>;
 
 export type CompileOptions = {
@@ -140,9 +144,10 @@ export function compile(
     return source.slice(node.start, node.end ?? node.start);
   }
 
-  function create(parent?: Scope, type?: "function"): Scope {
+  function create(type: ScopeType, parent?: Scope): Scope {
     const scope: Scope = Object.create(parent || null);
-    if (type === "function") scope[root] = scope;
+    const top = type === "block" ? parent![INFO].top : scope;
+    scope[INFO] = { type, top, id: crypto.randomUUID() };
     return scope;
   }
 
@@ -150,7 +155,8 @@ export function compile(
     return Object.assign(scope, Object.fromEntries(collectNames(pattern)));
   }
 
-  (function walk(node: AnyNode, scope?: Scope, ancestors: AnyNode[] = []) {
+  (function walk(node: AnyNode, scope: Scope, ancestors: AnyNode[] = []) {
+    const topLevel = scope[INFO].type === "module";
     switch (node.type) {
       case "FunctionDeclaration":
         if (!scope) {
@@ -160,7 +166,7 @@ export function compile(
         }
       case "FunctionExpression":
       case "ArrowFunctionExpression":
-        scope = assign(create(scope, "function"), node.params);
+        scope = assign(create("function", scope), node.params);
         node = node.body;
         break;
       case "ClassDeclaration":
@@ -187,7 +193,7 @@ export function compile(
         break;
       case "VariableDeclaration":
         // toplevel or hoisted to toplevel
-        if (!scope || node.kind === "var" && scope[root]) {
+        if (!scope || node.kind === "var" && scope[info]) {
           replace(node, "");
           node.declarations.toReversed().forEach(({ id, init }) => {
             if (!init) return;
@@ -219,7 +225,7 @@ export function compile(
     }
     // @ts-expect-error base is a recursive walker
     base[node.type](node, null, (n) => walk(n, scope, [node, ...ancestors]));
-  })(ast);
+  })(ast, create("module"));
 
   if (options.completion) {
     const node = ast.body.findLast(({ type }) => type === "ExpressionStatement");
